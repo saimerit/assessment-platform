@@ -1,0 +1,52 @@
+# JavaScript dependencies and framework caches
+**/node_modules/
+**/.next/
+**/.turbo/
+**/.cache/
+**/coverage/
+**/.parcel-cache/
+
+# Generated Electron application and packaged downloads
+/lockdown-client/out/
+/lockdown-client/dist/
+/lockdown-client/build/
+**/release/
+
+# Go build outputs and test profiles
+*.exe
+*.test
+*.prof
+coverage.out
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local runtime state and logs
+.assessment-platform-processes.json
+*.log
+*.log.*
+*.bundle
+
+# Editor settings and local tooling
+.vscode/
+.idea/
+*.swp
+
+# TypeScript and tool caches
+*.tsbuildinfo
+.eslintcache
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+

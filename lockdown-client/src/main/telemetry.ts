@@ -1,0 +1,60 @@
+import http from 'node:http'
+import https from 'node:https'
+
+interface TelemetryOptions {
+    blueprintId: string;
+    studentId: string;
+    violationType: string;
+    reportedBy?: string;
+    evidence?: Record<string, unknown>;
+}
+
+export function reportViolation({
+    blueprintId,
+    studentId,
+    violationType,
+    reportedBy = 'ELECTRON_LOCKDOWN_CLIENT',
+    evidence = {}
+}: TelemetryOptions): void {
+    const apiBase = process.env.ASSESSMENT_API_URL || 'http://localhost:8080/api'
+    let endpoint: URL
+    try {
+        endpoint = new URL(`${apiBase.replace(/\/+$/, '')}/proctor/incidents`)
+    } catch {
+        console.error('[Telemetry] Invalid ASSESSMENT_API_URL; incident was not sent.')
+        return
+    }
+    const payload = JSON.stringify({
+        blueprint_id: blueprintId,
+        student_id: studentId,
+        violation_type: violationType,
+        reported_by: reportedBy,
+        evidence_payload: evidence
+    });
+
+    const transport = endpoint.protocol === 'https:' ? https : http
+    const req = transport.request(
+        {
+            hostname: endpoint.hostname,
+            port: endpoint.port || undefined,
+            path: `${endpoint.pathname}${endpoint.search}`,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(payload)
+            }
+        },
+        (res) => {
+            if (res.statusCode !== 201) {
+                console.warn(`[Telemetry] Incident rejected with status ${res.statusCode}`);
+            }
+        }
+    );
+
+    req.on('error', (err) => {
+        console.error(`[Telemetry] Failed to dispatch incident: ${err.message}`);
+    });
+
+    req.write(payload);
+    req.end();
+}

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Assessment Platform · Container Logs</title>
+  <style>
+    :root { color-scheme: dark; font: 14px/1.45 system-ui, sans-serif; background: #070d1b; color: #e2e8f0; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 20px; }
+    header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin: 0 auto 16px; max-width: 1500px; }
+    h1 { margin: 0; font-size: 20px; }
+    .status { color: #94a3b8; font-size: 12px; }
+    .status.connected { color: #34d399; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; }
+    button, select { border: 1px solid #334155; border-radius: 6px; background: #111b2e; color: #e2e8f0; padding: 8px 10px; }
+    button { cursor: pointer; }
+    button:hover { background: #1e293b; }
+    #logs { max-width: 1500px; height: calc(100vh - 105px); overflow: auto; margin: auto; border: 1px solid #1e293b; border-radius: 8px; background: #030712; padding: 12px; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .line { display: grid; grid-template-columns: 145px 170px 55px minmax(0, 1fr); gap: 10px; padding: 2px 0; border-bottom: 1px solid #0f172a; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .time { color: #64748b; }.container { color: #60a5fa; }.stderr { color: #fca5a5; }.message { color: #cbd5e1; }
+    .notice { color: #fbbf24; }
+    @media (max-width: 700px) { body { padding: 10px; } #logs { height: calc(100vh - 125px); } .line { grid-template-columns: 1fr; gap: 0; padding: 6px 0; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>Assessment Platform · Container Logs</h1><div id="status" class="status">Connecting to Docker log stream…</div></div>
+    <div class="toolbar">
+      <select id="service" aria-label="Filter service"><option value="*">All containers</option></select>
+      <button id="pause" type="button">Pause</button>
+      <button id="clear" type="button">Clear</button>
+      <label><input id="follow" type="checkbox" checked> Follow latest</label>
+    </div>
+  </header>
+  <main id="logs" aria-live="polite"></main>
+  <script>
+    const status = document.getElementById('status');
+    const logs = document.getElementById('logs');
+    const service = document.getElementById('service');
+    const pause = document.getElementById('pause');
+    const follow = document.getElementById('follow');
+    const knownServices = new Set();
+    let paused = false;
+    let socket;
+
+    function connect() {
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      socket = new WebSocket(`${protocol}//${location.host}/stream`);
+      socket.addEventListener('open', () => { status.textContent = 'Connected · streaming container stdout and stderr'; status.className = 'status connected'; });
+      socket.addEventListener('message', (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === 'status') { status.textContent = data.text; return; }
+        if (paused || (service.value !== '*' && service.value !== data.container)) return;
+        if (!knownServices.has(data.container)) {
+          knownServices.add(data.container);
+          const option = document.createElement('option'); option.value = data.container; option.textContent = data.container; service.append(option);
+        }
+        const row = document.createElement('div'); row.className = 'line';
+        const time = document.createElement('span'); time.className = 'time'; time.textContent = new Date(data.time).toLocaleTimeString();
+        const container = document.createElement('span'); container.className = 'container'; container.textContent = data.container;
+        const stream = document.createElement('span'); stream.className = data.stream === 'stderr' ? 'stderr' : ''; stream.textContent = data.stream;
+        const message = document.createElement('span'); message.className = 'message'; message.textContent = data.text;
+        row.append(time, container, stream, message); logs.append(row);
+        while (logs.childElementCount > 3000) logs.firstElementChild.remove();
+        if (follow.checked) logs.scrollTop = logs.scrollHeight;
+      });
+      socket.addEventListener('close', () => { status.textContent = 'Disconnected · reconnecting…'; status.className = 'status'; setTimeout(connect, 1500); });
+      socket.addEventListener('error', () => socket.close());
+    }
+    pause.addEventListener('click', () => { paused = !paused; pause.textContent = paused ? 'Resume' : 'Pause'; });
+    document.getElementById('clear').addEventListener('click', () => { logs.replaceChildren(); });
+    connect();
+  </script>
+</body>
+</html>

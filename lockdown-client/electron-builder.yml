@@ -1,0 +1,20 @@
+appId: com.assessment.lockdown
+productName: AssessmentLockdownClient
+protocols:
+  - name: Assessment Lockdown Exam Link
+    schemes:
+      - lockdown
+directories:
+  buildResources: build
+  output: dist
+win:
+  target:
+    - target: portable
+      arch:
+        - x64
+  artifactName: "AssessmentLockdownClient-${version}.${ext}"
+nsis:
+  oneClick: true
+  perMachine: false
+  allowToChangeInstallationDirectory: false
+  deleteAppDataOnUninstall: false
