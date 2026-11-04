@@ -16,7 +16,11 @@ export function reportViolation({
     reportedBy = 'ELECTRON_LOCKDOWN_CLIENT',
     evidence = {}
 }: TelemetryOptions): void {
-    const apiBase = process.env.ASSESSMENT_API_URL || 'http://localhost:8080/api'
+    const apiBase = process.env.ASSESSMENT_API_URL
+	if (!apiBase) {
+		console.error('[Telemetry] ASSESSMENT_API_URL is not configured; incident was not sent.')
+		return
+	}
     let endpoint: URL
     try {
         endpoint = new URL(`${apiBase.replace(/\/+$/, '')}/proctor/incidents`)

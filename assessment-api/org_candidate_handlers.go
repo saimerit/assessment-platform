@@ -2,10 +2,9 @@ package main
 
 import (
 	crand "crypto/rand"
-	"encoding/json"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -27,7 +26,7 @@ func (s *Server) InviteCandidatesToOrganization(c *gin.Context) {
 		return
 	}
 	var req struct {
-		OrgID      string                       `json:"org_id"`
+		OrgID      string                        `json:"org_id"`
 		Candidates []organizationCandidateInvite `json:"candidates" binding:"required,min=1"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -105,10 +104,7 @@ func (s *Server) InviteCandidatesToOrganization(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Unable to save organization invitations"})
 		return
 	}
-	appURL := strings.TrimRight(os.Getenv("PUBLIC_APP_URL"), "/")
-	if appURL == "" {
-		appURL = "http://localhost:3000"
-	}
+	appURL := publicAppURL()
 	queuedCount := 0
 	for _, invite := range queued {
 		registrationURL := appURL + "/register/" + invite.token
@@ -236,4 +232,3 @@ func (s *Server) RegisterInvitedCandidate(c *gin.Context) {
 	}
 	c.JSON(http.StatusCreated, gin.H{"token": token, "user": gin.H{"id": userID, "full_name": name, "email": email, "role": "CANDIDATE", "org_id": orgID}})
 }
-

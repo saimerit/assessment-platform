@@ -22,7 +22,7 @@ func main() {
 	ctx := context.Background()
 	connStr := os.Getenv("ASSESSMENT_DATABASE_URL")
 	if connStr == "" {
-		connStr = "postgres://assessment_app:assessment_app_dev_password@localhost:5433/assessment_db?sslmode=disable"
+		log.Fatal("ASSESSMENT_DATABASE_URL must be set")
 	}
 	conn, err := pgx.Connect(ctx, connStr)
 	if err != nil {

@@ -1,0 +1,56 @@
+services:
+  gateway:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    environment:
+      PORTAL_DOMAIN: ${PORTAL_DOMAIN:?set PORTAL_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./ops/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - portal
+      - api
+
+  portal:
+    build: ./admin-portal
+    restart: unless-stopped
+    environment:
+      PORT: "3000"
+
+  api:
+    build: ./assessment-api
+    restart: unless-stopped
+    environment:
+      ASSESSMENT_API_PORT: "8080"
+      ASSESSMENT_DATABASE_URL: ${ASSESSMENT_DATABASE_URL:?set ASSESSMENT_DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:?set REDIS_URL}
+      RABBITMQ_URL: ${RABBITMQ_URL:?set RABBITMQ_URL}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:?set PUBLIC_APP_URL}
+      CLIENT_RELEASE_URL: ${CLIENT_RELEASE_URL:?set CLIENT_RELEASE_URL}
+
+  grading-worker:
+    build: ./grading-worker
+    restart: unless-stopped
+    environment:
+      GRADING_DATABASE_URL: ${GRADING_DATABASE_URL:?set GRADING_DATABASE_URL}
+      RABBITMQ_URL: ${RABBITMQ_URL:?set RABBITMQ_URL}
+
+  notification-worker:
+    build: ./notification-worker
+    restart: unless-stopped
+    environment:
+      ASSESSMENT_DATABASE_URL: ${ASSESSMENT_DATABASE_URL:?set ASSESSMENT_DATABASE_URL}
+      RABBITMQ_URL: ${RABBITMQ_URL:?set RABBITMQ_URL}
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:?set PUBLIC_APP_URL}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_SENDER: ${SMTP_SENDER:-}
+
+volumes:
+  caddy_data:
+  caddy_config:

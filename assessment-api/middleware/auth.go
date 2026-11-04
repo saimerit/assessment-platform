@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -9,7 +11,18 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-var JWTSecret = []byte("assessment_platform_super_secret_jwt_key_2026")
+var JWTSecret []byte
+
+// LoadJWTSecret is called during service startup. Keeping this explicit makes a
+// missing or weak secret a deployment error instead of silently accepting a
+// source-controlled fallback.
+func LoadJWTSecret() {
+	secret := strings.TrimSpace(os.Getenv("JWT_SECRET"))
+	if len(secret) < 32 {
+		panic("JWT_SECRET must be set and contain at least 32 characters")
+	}
+	JWTSecret = []byte(secret)
+}
 
 type Claims struct {
 	UserID string `json:"user_id"`
@@ -48,6 +61,9 @@ func AuthMiddleware() gin.HandlerFunc {
 		claims := &Claims{}
 
 		token, err := jwt.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok || token.Method.Alg() != jwt.SigningMethodHS256.Alg() {
+				return nil, fmt.Errorf("unexpected signing method %q", token.Header["alg"])
+			}
 			return JWTSecret, nil
 		})
 

@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('lockdownAPI', {
+  apiBaseUrl: process.env.ASSESSMENT_API_URL,
+  portalBaseUrl: process.env.PUBLIC_PORTAL_URL,
   checkMonitors: () => ipcRenderer.invoke('check-monitors'),
   getExamToken: () => ipcRenderer.invoke('exam:get-token'),
   setExamContext: (context: { blueprintId: string; studentId: string }) => ipcRenderer.invoke('exam:set-context', context),

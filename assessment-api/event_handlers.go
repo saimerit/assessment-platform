@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -220,11 +219,7 @@ func (s *Server) CreateProctor(c *gin.Context) {
 	if generated {
 		resp["temporary_password"] = password
 	}
-	appURL := strings.TrimRight(os.Getenv("PUBLIC_APP_URL"), "/")
-	if appURL == "" {
-		appURL = "http://localhost:3000"
-	}
-	invite := NotificationEventPayload{Event: "PROCTOR_INVITE", RecipientEmail: strings.TrimSpace(req.Email), CandidateName: strings.TrimSpace(req.FullName), ExamTitle: "Assessment Proctor Portal", Passcode: password, InvitationURL: appURL + "/login"}
+	invite := NotificationEventPayload{Event: "PROCTOR_INVITE", RecipientEmail: strings.TrimSpace(req.Email), CandidateName: strings.TrimSpace(req.FullName), ExamTitle: "Assessment Proctor Portal", Passcode: password, InvitationURL: publicAppURL() + "/login"}
 	inviteBytes, _ := json.Marshal(invite)
 	if err := s.mqChan.PublishWithContext(c.Request.Context(), "", "notification_events", false, false, amqp.Publishing{ContentType: "application/json", DeliveryMode: amqp.Persistent, Body: inviteBytes}); err != nil {
 		log.Printf("Failed to queue proctor welcome email for account %s: %v", id, err)
@@ -865,7 +860,7 @@ func (s *Server) InviteEventCandidates(c *gin.Context) {
 		if i >= len(invites) {
 			break
 		}
-		payload := NotificationEventPayload{Event: "EXAM_INVITATION", RecipientEmail: cand.Email, CandidateName: cand.FullName, ExamTitle: title, ScheduledStart: start, ScheduledEnd: end, AssessmentID: eventID, ProctoringMode: mode, InvitationToken: strings.TrimPrefix(invites[i].InvitationURL, buildGatewayURL("")), InvitationURL: invites[i].InvitationURL, TemporaryPassword: invites[i].TemporaryPassword, ClientDownloadURL: "https://releases.assessmentplatform.internal/AssessmentLockdownClient-1.0.0.exe"}
+		payload := NotificationEventPayload{Event: "EXAM_INVITATION", RecipientEmail: cand.Email, CandidateName: cand.FullName, ExamTitle: title, ScheduledStart: start, ScheduledEnd: end, AssessmentID: eventID, ProctoringMode: mode, InvitationToken: strings.TrimPrefix(invites[i].InvitationURL, buildGatewayURL("")), InvitationURL: invites[i].InvitationURL, TemporaryPassword: invites[i].TemporaryPassword, ClientDownloadURL: clientReleaseURL()}
 		body, _ := json.Marshal(payload)
 		_ = s.mqChan.PublishWithContext(ctx, "", "notification_events", false, false, amqp.Publishing{ContentType: "application/json", DeliveryMode: amqp.Persistent, Body: body})
 	}
@@ -972,7 +967,7 @@ func (s *Server) AssignEventCandidates(c *gin.Context) {
 	}
 	for _, invite := range invites {
 		token := strings.TrimPrefix(invite.InvitationURL, buildGatewayURL(""))
-		payload := NotificationEventPayload{Event: "EXAM_INVITATION", RecipientEmail: invite.Email, CandidateName: invite.CandidateName, ExamTitle: title, ScheduledStart: start, ScheduledEnd: end, AssessmentID: eventID, ProctoringMode: mode, InvitationToken: token, InvitationURL: invite.InvitationURL, ClientDownloadURL: "https://releases.assessmentplatform.internal/AssessmentLockdownClient-1.0.0.exe"}
+		payload := NotificationEventPayload{Event: "EXAM_INVITATION", RecipientEmail: invite.Email, CandidateName: invite.CandidateName, ExamTitle: title, ScheduledStart: start, ScheduledEnd: end, AssessmentID: eventID, ProctoringMode: mode, InvitationToken: token, InvitationURL: invite.InvitationURL, ClientDownloadURL: clientReleaseURL()}
 		body, _ := json.Marshal(payload)
 		_ = s.mqChan.PublishWithContext(ctx, "", "notification_events", false, false, amqp.Publishing{ContentType: "application/json", DeliveryMode: amqp.Persistent, Body: body})
 	}

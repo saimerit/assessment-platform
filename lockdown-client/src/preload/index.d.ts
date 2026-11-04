@@ -1,5 +1,7 @@
 
 export interface LockdownAPI {
+  apiBaseUrl: string
+  portalBaseUrl: string
   checkMonitors: () => Promise<{ count: number; isSafe: boolean }>
   getExamToken: () => Promise<string | null>
   setExamContext: (context: { blueprintId: string; studentId: string }) => Promise<void>

@@ -1,4 +1,5 @@
 \connect assessment_db
+\getenv client_release_url CLIENT_RELEASE_URL
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
@@ -29,7 +30,7 @@ CREATE INDEX IF NOT EXISTS idx_client_releases_released_at
 INSERT INTO client_releases (version, download_url, release_notes, is_mandatory)
 VALUES (
     '1.0.0',
-    'https://releases.assessmentplatform.internal/AssessmentLockdownClient-1.0.0.exe',
+    :'client_release_url',
     'Initial Secure Client Release',
     TRUE
 )

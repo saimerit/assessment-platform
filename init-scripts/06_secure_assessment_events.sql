@@ -1,4 +1,6 @@
 \connect assessment_db
+\getenv assessment_app_password ASSESSMENT_APP_DB_PASSWORD
+\getenv assessment_grader_password ASSESSMENT_GRADER_DB_PASSWORD
 
 -- One organization admin, multiple proctors, organization-owned question banks.
 ALTER TABLE organizations ADD COLUMN IF NOT EXISTS admin_id UUID;
@@ -188,12 +190,14 @@ ALTER TABLE candidate_session_results ALTER COLUMN max_score TYPE NUMERIC(10,2) 
 -- cannot read them; only the grading login can SELECT them.
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'assessment_app') THEN
-        CREATE ROLE assessment_app LOGIN PASSWORD 'assessment_app_dev_password';
+        CREATE ROLE assessment_app LOGIN;
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'assessment_grader') THEN
-        CREATE ROLE assessment_grader LOGIN PASSWORD 'assessment_grader_dev_password';
+        CREATE ROLE assessment_grader LOGIN;
     END IF;
 END $$;
+ALTER ROLE assessment_app PASSWORD :'assessment_app_password';
+ALTER ROLE assessment_grader PASSWORD :'assessment_grader_password';
 
 REVOKE ALL ON SCHEMA answer_vault FROM PUBLIC;
 REVOKE ALL ON TABLE answer_vault.secure_answer_keys FROM PUBLIC;

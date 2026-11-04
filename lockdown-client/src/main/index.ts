@@ -12,6 +12,26 @@ let isLockdownActive = false
 let lockdownShortcutsRegistered = false
 let versionProbeServer: HttpServer | null = null
 
+type ClientRuntimeConfig = { apiBaseURL: URL; portalBaseURL: URL }
+let runtimeConfig: ClientRuntimeConfig | null = null
+
+function requiredRuntimeURL(name: 'ASSESSMENT_API_URL' | 'PUBLIC_PORTAL_URL'): URL {
+  const raw = process.env[name]?.trim()
+  if (!raw) throw new Error(`${name} must be set before starting Assessment Lockdown Client`)
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    throw new Error(`${name} must be an absolute http(s) URL`)
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error(`${name} must be an absolute http(s) URL`)
+  return parsed
+}
+
+function loadRuntimeConfig(): ClientRuntimeConfig {
+  return { apiBaseURL: requiredRuntimeURL('ASSESSMENT_API_URL'), portalBaseURL: requiredRuntimeURL('PUBLIC_PORTAL_URL') }
+}
+
 function isTrustedRendererMediaRequest(webContents: WebContents, requestingUrl?: string): boolean {
   if (!mainWindow || webContents.id !== mainWindow.webContents.id || !requestingUrl) return false
   try {
@@ -298,8 +318,8 @@ ipcMain.handle('system:open-external', async (_event, target: string) => {
   } catch {
     throw new Error('Invalid gateway URL')
   }
-  if (url.protocol !== 'http:' || !['localhost', '127.0.0.1'].includes(url.hostname) || url.port !== '3000') {
-    throw new Error('Only the local exam gateway can be opened from the client')
+  if (!runtimeConfig || url.origin !== runtimeConfig.portalBaseURL.origin || !url.pathname.startsWith('/exg/')) {
+    throw new Error('Only an exam gateway on the configured portal origin can be opened from the client')
   }
   await shell.openExternal(url.toString())
 })
@@ -309,6 +329,7 @@ ipcMain.handle('quit-app', () => {
 })
 
 app.whenReady().then(async () => {
+  runtimeConfig = loadRuntimeConfig()
   configureMediaPermissions()
   startVersionProbeServer()
   const mitigation = await mitigateUnwantedProcesses()

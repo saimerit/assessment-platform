@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useState, type FormEvent } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8081/api';
+const API_BASE = '/api';
 type Invitation = { email: string; full_name: string; organization: string; expires_at: string };
 
 export default function CandidateRegistrationPage() {

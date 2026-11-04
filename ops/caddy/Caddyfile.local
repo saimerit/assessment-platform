@@ -1,0 +1,5 @@
+:80 {
+	@api path /api/*
+	reverse_proxy @api api:8080
+	reverse_proxy portal:3000
+}

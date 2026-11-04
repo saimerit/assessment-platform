@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -23,10 +22,7 @@ func main() {
 	ctx := context.Background()
 
 	// 1. PostgreSQL Connection Pool
-	databaseURL := os.Getenv("GRADING_DATABASE_URL")
-	if databaseURL == "" {
-		databaseURL = "postgres://assessment_grader:assessment_grader_dev_password@127.0.0.1:5433/assessment_db?sslmode=disable"
-	}
+	databaseURL := requiredEnv("GRADING_DATABASE_URL")
 	dbpool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		log.Fatalf("Unable to parse DB config: %v\n", err)
@@ -37,10 +33,7 @@ func main() {
 	defer dbpool.Close()
 
 	// 2. RabbitMQ Connection
-	rabbitMQURL := os.Getenv("RABBITMQ_URL")
-	if rabbitMQURL == "" {
-		rabbitMQURL = "amqp://guest:guest@localhost:5672/"
-	}
+	rabbitMQURL := requiredEnv("RABBITMQ_URL")
 	var mqConn *amqp.Connection
 	for attempt := 1; ; attempt++ {
 		mqConn, err = amqp.Dial(rabbitMQURL)

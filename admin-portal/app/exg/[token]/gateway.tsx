@@ -20,10 +20,10 @@ interface ClientProbe {
   status?: string;
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
-const CLIENT_DOWNLOAD_URL =
-  process.env.NEXT_PUBLIC_LOCKDOWN_CLIENT_URL ||
-  'https://releases.assessmentplatform.internal/AssessmentLockdownClient-1.0.0.exe';
+const API_BASE = '/api';
+// The API supplies the configured release URL. A missing value intentionally
+// leaves the link unavailable rather than sending candidates to a baked host.
+const CLIENT_DOWNLOAD_URL = '';
 const CLIENT_PROBE_URL = 'http://127.0.0.1:48991/version';
 
 function compareVersions(installed: string, required: string): number {

@@ -22,7 +22,7 @@ $ npm run dev
 
 ### Build
 
-Set `VITE_API_URL` to the Assessment API base URL, including `/api`, before building the installer. The same value configures renderer requests and proctor telemetry. It defaults to `http://localhost:8080/api` for local development.
+Set `ASSESSMENT_API_URL` (including `/api`) and `PUBLIC_PORTAL_URL` before launching the client. These values are read at runtime, so one installer can be used in each environment without rebuilding.
 
 ```bash
 # For windows

@@ -12,8 +12,6 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
-	"os"
-	"strings"
 	"time"
 
 	"assessment-api/middleware"
@@ -160,13 +158,11 @@ type ExamSectionOverview struct {
 
 func main() {
 	ctx := context.Background()
+	cfg := loadRuntimeConfig()
+	middleware.LoadJWTSecret()
 
 	// The application role has no SELECT permission on the isolated answer vault.
-	databaseURL := os.Getenv("ASSESSMENT_DATABASE_URL")
-	if databaseURL == "" {
-		databaseURL = "postgres://assessment_app:assessment_app_dev_password@127.0.0.1:5433/assessment_db?sslmode=disable"
-	}
-	dbpool, err := pgxpool.New(ctx, databaseURL)
+	dbpool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("Unable to parse DB config: %v\n", err)
 	}
@@ -176,23 +172,19 @@ func main() {
 	defer dbpool.Close()
 
 	// 2. Redis Connection
-	redisAddr := os.Getenv("REDIS_ADDR")
-	if redisAddr == "" {
-		redisAddr = "localhost:6379"
+	redisOptions, err := redis.ParseURL(cfg.RedisURL)
+	if err != nil {
+		log.Fatalf("Unable to parse Redis config: %v", err)
 	}
-	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
+	rdb := redis.NewClient(redisOptions)
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		log.Fatalf("Unable to connect to Redis: %v\n", err)
 	}
 
 	// 3. RabbitMQ Connection & Queue Declarations
-	rabbitMQURL := os.Getenv("RABBITMQ_URL")
-	if rabbitMQURL == "" {
-		rabbitMQURL = "amqp://guest:guest@localhost:5672/"
-	}
 	var mqConn *amqp.Connection
 	for attempt := 1; ; attempt++ {
-		mqConn, err = amqp.Dial(rabbitMQURL)
+		mqConn, err = amqp.Dial(cfg.RabbitMQURL)
 		if err == nil {
 			break
 		}
@@ -328,12 +320,8 @@ func main() {
 		candidate.GET("/assessments", srv.GetCandidateAssessments)
 	}
 
-	apiPort := os.Getenv("ASSESSMENT_API_PORT")
-	if apiPort == "" {
-		apiPort = "8080"
-	}
-	log.Printf("Assessment API running on :%s", apiPort)
-	if err := r.Run(":" + apiPort); err != nil {
+	log.Printf("Assessment API running on :%s", cfg.Port)
+	if err := r.Run(":" + cfg.Port); err != nil {
 		log.Fatalf("Assessment API failed to start: %v", err)
 	}
 }
@@ -1087,7 +1075,7 @@ func (s *Server) HandleBatchInvite(c *gin.Context) {
 			ScheduledEnd:      req.ScheduledEnd,
 			BlueprintID:       blueprintID,
 			StudentID:         studentID,
-			ClientDownloadURL: "https://releases.assessmentplatform.internal/AssessmentLockdownClient-1.0.0.exe",
+			ClientDownloadURL: clientReleaseURL(),
 			InvitationToken:   invitationToken,
 			InvitationURL:     buildGatewayURL(invitationToken),
 		}
@@ -1127,11 +1115,7 @@ func (s *Server) HandleBatchInvite(c *gin.Context) {
 }
 
 func buildGatewayURL(token string) string {
-	appURL := strings.TrimRight(os.Getenv("PUBLIC_APP_URL"), "/")
-	if appURL == "" {
-		appURL = "http://localhost:3000"
-	}
-	return appURL + "/exg/" + url.PathEscape(token)
+	return publicAppURL() + "/exg/" + url.PathEscape(token)
 }
 
 // GetAssessmentInvitations reloads active gateway links for the campaign table.
@@ -1203,7 +1187,7 @@ func (s *Server) HandleExamGateway(c *gin.Context) {
 		}
 		eventCandidate.BlueprintID = eventCandidate.AssessmentID
 		eventCandidate.MinClientVersion = "1.0.0"
-		eventCandidate.LatestClientURL = "https://releases.assessmentplatform.internal/AssessmentLockdownClient-1.0.0.exe"
+		eventCandidate.LatestClientURL = clientReleaseURL()
 		eventCandidate.IntakeFields = json.RawMessage(`[]`)
 		eventCandidate.Sections, err = s.loadExamSectionOverview(c, eventCandidate.SessionID)
 		if err != nil {
@@ -1225,14 +1209,14 @@ func (s *Server) HandleExamGateway(c *gin.Context) {
 			i.scheduled_end,
 			COALESCE(b.min_client_version, '1.0.0'),
 			COALESCE((SELECT cr.download_url FROM client_releases cr ORDER BY cr.released_at DESC LIMIT 1),
-				'https://releases.assessmentplatform.internal/AssessmentLockdownClient-1.0.0.exe')
+				$2)
 		FROM assessment_invitations i
 		JOIN users u ON u.id = i.student_id
 		JOIN assessment_blueprints b ON b.id = i.blueprint_id
 		WHERE i.invitation_token = $1 AND i.status = 'INVITED'`
 
 	var candidate ExamGatewayResponse
-	err = s.db.QueryRow(c.Request.Context(), query, token).Scan(
+	err = s.db.QueryRow(c.Request.Context(), query, token, clientReleaseURL()).Scan(
 		&candidate.BlueprintID,
 		&candidate.StudentID,
 		&candidate.CandidateName,

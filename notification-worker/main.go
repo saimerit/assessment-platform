@@ -8,7 +8,6 @@ import (
 	"net/smtp"
 	"net/url"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -42,10 +41,7 @@ func main() {
 	ctx := context.Background()
 
 	// 1. PostgreSQL connection
-	databaseURL := os.Getenv("ASSESSMENT_DATABASE_URL")
-	if databaseURL == "" {
-		databaseURL = "postgres://assessment_app:assessment_app_dev_password@127.0.0.1:5433/assessment_db?sslmode=disable"
-	}
+	databaseURL := requiredEnv("ASSESSMENT_DATABASE_URL")
 	dbpool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		log.Fatalf("Database connection failed: %v\n", err)
@@ -57,10 +53,7 @@ func main() {
 	}
 
 	// 2. RabbitMQ connection
-	rabbitMQURL := os.Getenv("RABBITMQ_URL")
-	if rabbitMQURL == "" {
-		rabbitMQURL = "amqp://guest:guest@localhost:5672/"
-	}
+	rabbitMQURL := requiredEnv("RABBITMQ_URL")
 	var mqConn *amqp.Connection
 	for attempt := 1; ; attempt++ {
 		mqConn, err = amqp.Dial(rabbitMQURL)
@@ -137,10 +130,7 @@ func main() {
 func (w *Worker) dispatchNotification(ctx context.Context, ev NotificationEventPayload) error {
 	gatewayURL := ev.InvitationURL
 	if gatewayURL == "" {
-		appURL := strings.TrimRight(os.Getenv("PUBLIC_APP_URL"), "/")
-		if appURL == "" {
-			appURL = "http://localhost:3000"
-		}
+		appURL := publicAppURL()
 		gatewayURL = fmt.Sprintf("%s/exg/%s", appURL, url.PathEscape(ev.InvitationToken))
 	}
 	var htmlBody string
@@ -149,10 +139,7 @@ func (w *Worker) dispatchNotification(ctx context.Context, ev NotificationEventP
 	} else if ev.Event == "CANDIDATE_ORG_INVITE" {
 		htmlBody = renderCandidateOrgInviteEmail(ev.CandidateName, ev.ExamTitle, gatewayURL)
 	} else {
-		appURL := strings.TrimRight(os.Getenv("PUBLIC_APP_URL"), "/")
-		if appURL == "" {
-			appURL = "http://localhost:3000"
-		}
+		appURL := publicAppURL()
 		htmlBody = renderInvitationEmail(ev.CandidateName, ev.RecipientEmail, ev.ExamTitle, ev.Passcode, ev.TemporaryPassword, ev.ScheduledStart, ev.ScheduledEnd, gatewayURL, appURL+"/candidate", ev.ClientDownloadURL, ev.ProctoringMode)
 	}
 

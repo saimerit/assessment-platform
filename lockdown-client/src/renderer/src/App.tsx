@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react'
 import { ExamRunner } from './components/ExamRunner'
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8081/api'
+const API_BASE = window.lockdownAPI.apiBaseUrl
 
 interface IntakeField {
   key: string
@@ -239,7 +239,7 @@ export default function App() {
       return
     }
     try {
-      await window.lockdownAPI.openExternal(`http://localhost:3000/exg/${encodeURIComponent(token)}`)
+      await window.lockdownAPI.openExternal(`${window.lockdownAPI.portalBaseUrl.replace(/\/+$/, '')}/exg/${encodeURIComponent(token)}`)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Unable to open the exam gateway.')
     }
