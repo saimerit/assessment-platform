@@ -1,4 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import type { AttemptClient } from '../services/AttemptClient'
+import { AttemptCheckpointClient, type CheckpointAnswer, type CheckpointView } from '../services/AttemptCheckpointClient'
+import { AttemptSaveStatus } from './AttemptSaveStatus'
+import { AttemptSubmissionClient, fetchSubmissionReceipt, type SubmissionReceipt, type SubmissionView } from '../services/AttemptSubmissionClient'
+import { SubmissionStatus } from './SubmissionStatus'
 
 interface Option {
   id: string
@@ -21,11 +26,11 @@ interface ExamRunnerProps {
   blueprintId: string
   studentId: string
   sessionId?: string
-  apiBaseUrl: string
+  attemptClient: AttemptClient
   durationSeconds: number
   onTimerStarted: (expiresAt: string, serverTime: string) => void
   onStarted: () => Promise<void>
-  onSubmitted: (instanceId: string) => void
+  onSubmitted: (receipt: SubmissionReceipt) => void
 }
 
 const buttonStyle: CSSProperties = {
@@ -37,7 +42,7 @@ export function ExamRunner({
   blueprintId,
   studentId,
   sessionId,
-  apiBaseUrl,
+  attemptClient,
   durationSeconds,
   onTimerStarted,
   onStarted,
@@ -46,8 +51,6 @@ export function ExamRunner({
   const [questions, setQuestions] = useState<Question[]>([])
   const [currentIndex, setCurrentIndex] = useState(0)
   const [activeView, setActiveView] = useState<'home' | 'question'>('home')
-  const [selectedAnswers, setSelectedAnswers] = useState<Record<string, string | string[]>>({})
-  const [flaggedForReview, setFlaggedForReview] = useState<Record<string, boolean>>({})
   const [remainingSeconds, setRemainingSeconds] = useState(Math.max(0, durationSeconds))
   const [timerDeadlineMs, setTimerDeadlineMs] = useState(() => Date.now() + Math.max(0, durationSeconds) * 1000)
   const [timerClockOffsetMs, setTimerClockOffsetMs] = useState(0)
@@ -55,9 +58,14 @@ export function ExamRunner({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [submitModalOpen, setSubmitModalOpen] = useState(false)
-  const [instanceId, setInstanceId] = useState('')
-  const answersRef = useRef<Record<string, string | string[]>>({})
-  const remainingRef = useRef(Math.max(0, durationSeconds))
+  const submissionClient = useRef<AttemptSubmissionClient | null>(null)
+  const [submissionView,setSubmissionView] = useState<SubmissionView | null>(null)
+  const finalizing = submissionView !== null && ['syncing','submitting','pending','received'].includes(submissionView.status)
+  const checkpointClient = useRef<AttemptCheckpointClient | null>(null)
+  const recoveryClosing = useRef<Promise<void>>(Promise.resolve())
+  const [saveView, setSaveView] = useState<CheckpointView | null>(null)
+  const selectedAnswers = useMemo<Record<string, string | string[]>>(() => Object.fromEntries(Object.values(saveView?.answers ?? {}).map(answer => [answer.question_id, answer.typed_response !== null ? answer.typed_response : answer.selected_option_ids])), [saveView])
+  const flaggedForReview = useMemo(() => Object.fromEntries(Object.values(saveView?.answers ?? {}).map(answer => [answer.question_id, answer.reviewed])), [saveView])
   const submittingRef = useRef(false)
   const submitRef = useRef<() => Promise<void>>(async () => undefined)
 
@@ -68,8 +76,11 @@ export function ExamRunner({
       setLoading(true)
       setError('')
       try {
+        const attemptPath=sessionId ? '/exam/sessions/'+sessionId : '/assessments/'+blueprintId
+        const receipt=await fetchSubmissionReceipt(attemptClient,attemptPath,controller.signal)
+        if(receipt){await window.lockdownAPI.clearRecovery().catch(()=>{});if(active)onSubmitted(receipt);return}
         if (sessionId) {
-          const startResponse = await fetch(`${apiBaseUrl}/exam/sessions/${encodeURIComponent(sessionId)}/start`, { method: 'POST', signal: controller.signal })
+          const startResponse = await attemptClient.request(`/exam/sessions/${encodeURIComponent(sessionId)}/start`, { method: 'POST', signal: controller.signal })
           const startData = await startResponse.json().catch(() => ({}))
           if (!startResponse.ok) throw new Error(startData.error || 'Unable to start the exam timer.')
           const deadline = Date.parse(startData.timer_expires_at)
@@ -79,14 +90,13 @@ export function ExamRunner({
           setTimerDeadlineMs(deadline)
           setTimerClockOffsetMs(offset)
           const initialRemaining = Math.max(0, Math.ceil((deadline - (Date.now() + offset)) / 1000))
-          remainingRef.current = initialRemaining
           setRemainingSeconds(initialRemaining)
           onTimerStarted(startData.timer_expires_at, startData.server_time)
           await onStarted()
         }
         const response = sessionId
-          ? await fetch(`${apiBaseUrl}/exam/sessions/${encodeURIComponent(sessionId)}/questions`, { signal: controller.signal })
-          : await fetch(`${apiBaseUrl}/assessments/${blueprintId}/start`, {
+          ? await attemptClient.request(`/exam/sessions/${encodeURIComponent(sessionId)}/questions`, { signal: controller.signal })
+          : await attemptClient.request(`/assessments/${blueprintId}/start`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ student_id: studentId }),
           signal: controller.signal
         })
@@ -96,8 +106,29 @@ export function ExamRunner({
           throw new Error('No questions are available. Contact your assessment coordinator.')
         }
         if (!active) return
-        setInstanceId(data.instance_id || sessionId || '')
-        if (!sessionId) await onStarted()
+        if (!sessionId) {
+          const deadline = Date.parse(data.timer_expires_at), serverTime = Date.parse(data.server_time)
+          if (!Number.isFinite(deadline) || !Number.isFinite(serverTime)) throw new Error('Invalid server exam timer.')
+          setTimerDeadlineMs(deadline); setTimerClockOffsetMs(serverTime - Date.now())
+          onTimerStarted(data.timer_expires_at, data.server_time)
+          await onStarted()
+        }
+        if (!active) return
+        const paper = data.questions as Question[]
+        await recoveryClosing.current
+        if (!active) return
+        const owner = new AttemptCheckpointClient(attemptClient, sessionId ? '/exam/sessions/' + sessionId + '/checkpoint' : '/assessments/' + blueprintId + '/checkpoint', {
+          read: () => window.lockdownAPI.readRecovery(), write: value => window.lockdownAPI.writeRecovery(value), clear: () => window.lockdownAPI.clearRecovery()
+        }, view => {
+          if (!active) return
+          setSaveView(view)
+          const index = paper.findIndex(question => question.question_id === view.navigation.question_id)
+          if (index >= 0) setCurrentIndex(index)
+          setActiveView(view.navigation.active_view)
+        }, new Set(paper.map(question => question.question_id)))
+        checkpointClient.current = owner
+        await owner.open()
+        submissionClient.current=new AttemptSubmissionClient(attemptClient,attemptPath,owner,view=>{if(active)setSubmissionView(view)})
         if (active) setQuestions(data.questions as Question[])
       } catch (cause) {
         if (active && !controller.signal.aborted) {
@@ -111,47 +142,21 @@ export function ExamRunner({
     return () => {
       active = false
       controller.abort()
+      submissionClient.current?.dispose()
+      recoveryClosing.current = checkpointClient.current?.dispose() ?? Promise.resolve()
+      checkpointClient.current = null
     }
-  }, [apiBaseUrl, blueprintId, onStarted, onTimerStarted, sessionId, studentId])
+  }, [attemptClient, blueprintId, onStarted, onTimerStarted, sessionId, studentId])
 
   const handleSubmitFinal = useCallback(async () => {
-    if (submittingRef.current) return
-    submittingRef.current = true
-    setIsSubmitting(true)
-    setError('')
-    try {
-      const response = await fetch(sessionId
-        ? `${apiBaseUrl}/exam/sessions/${encodeURIComponent(sessionId)}/submit`
-        : `${apiBaseUrl}/assessments/${blueprintId}/submit`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(sessionId ? {
-          answers: Object.entries(answersRef.current).map(([question_id, response]) => {
-            const question = questions.find((entry) => entry.question_id === question_id)
-            return question?.question_type === 'FIB'
-              ? { question_id, typed_response: String(response) }
-              : { question_id, selected_option_ids: Array.isArray(response) ? response : [response] }
-          })
-        } : {
-          student_id: studentId,
-          answers: Object.entries(answersRef.current).map(([question_id, response]) => {
-            const question = questions.find((entry) => entry.question_id === question_id)
-            return question?.question_type === 'FIB'
-              ? { question_id, typed_response: String(response) }
-              : { question_id, option_ids: Array.isArray(response) ? response : [response] }
-          })
-        })
-      })
-      const data = await response.json().catch(() => ({}))
-      if (!response.ok) throw new Error(data.error || 'Submission failed. Please try again.')
-      onSubmitted(data.instance_id || instanceId)
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Submission failed. Please try again.')
-      submittingRef.current = false
-      setIsSubmitting(false)
-      setSubmitModalOpen(false)
-    }
-  }, [apiBaseUrl, blueprintId, instanceId, onSubmitted, questions, sessionId, studentId])
+    if(submittingRef.current || !submissionClient.current) return
+    submittingRef.current=true;setIsSubmitting(true);setError('')
+    const deadline=Date.now()+timerClockOffsetMs>=timerDeadlineMs
+    const receipt=await submissionClient.current.finalize(deadline)
+    if(receipt)onSubmitted(receipt)
+    else {setIsSubmitting(false);setSubmitModalOpen(false)}
+    submittingRef.current=false
+  },[onSubmitted,timerDeadlineMs,timerClockOffsetMs])
 
   useEffect(() => { submitRef.current = handleSubmitFinal }, [handleSubmitFinal])
 
@@ -161,7 +166,6 @@ export function ExamRunner({
     const tick = () => {
       if (deadlineSubmitted) return
       const next = Math.max(0, Math.ceil((timerDeadlineMs - (Date.now() + timerClockOffsetMs)) / 1000))
-      remainingRef.current = next
       setRemainingSeconds(next)
       if (next === 0) {
         deadlineSubmitted = true
@@ -174,6 +178,13 @@ export function ExamRunner({
     return () => window.clearInterval(timer)
   }, [loading, questions.length, timerDeadlineMs, timerClockOffsetMs])
 
+  useEffect(() => {
+    const retry = () => { if(Date.now()+timerClockOffsetMs>=timerDeadlineMs || submissionView?.status==='pending')void submitRef.current();else void checkpointClient.current?.flush() }
+    const timer = window.setInterval(retry, 5000)
+    window.addEventListener('online', retry)
+    return () => { window.clearInterval(timer); window.removeEventListener('online', retry) }
+  }, [submissionView?.status,timerDeadlineMs,timerClockOffsetMs])
+
   if (loading) {
     return <div style={{ minHeight: '100%', display: 'grid', placeItems: 'center', color: '#94a3b8' }}>Loading assessment paper…</div>
   }
@@ -184,7 +195,8 @@ export function ExamRunner({
 
   const currentQuestion = questions[currentIndex]
   if (!currentQuestion && activeView === 'question') return null
-  const answeredCount = Object.keys(selectedAnswers).length
+  const hasResponse = (response: string | string[] | undefined) => Array.isArray(response) ? response.length > 0 : !!response?.trim()
+  const answeredCount = Object.values(selectedAnswers).filter(hasResponse).length
   const minutes = Math.floor(remainingSeconds / 60)
   const seconds = remainingSeconds % 60
   const sections = questions.reduce<{ id: string; name: string; indices: number[] }[]>((groups, question, index) => {
@@ -195,21 +207,36 @@ export function ExamRunner({
     return groups
   }, [])
   const currentSection = sections.find((section) => section.indices.includes(currentIndex))
+  const conflictDetails = saveView?.conflicts.map(id => {
+    const question = questions.find(item => item.question_id === id)
+    const describe = (answer: CheckpointAnswer | undefined) => {
+      if (!answer) return 'Not answered'
+      const response = answer.typed_response?.trim() || answer.selected_option_ids.map(optionId => question?.options?.find(option => option.id === optionId)?.text ?? 'Selected option').join(', ') || 'Not answered'
+      return response + (answer.reviewed ? ' · Flagged for review' : '')
+    }
+    return { title: question?.title ?? 'Question', local: describe(saveView.answers[id]), server: describe(saveView.serverAnswers[id]) }
+  }) ?? []
 
   const openQuestion = (index: number) => {
-    setCurrentIndex(index)
-    setActiveView('question')
+    checkpointClient.current?.navigate({ question_id: questions[index].question_id, active_view: 'question' })
   }
-
+  const openOverview = () => checkpointClient.current?.navigate({ question_id: questions[currentIndex]?.question_id ?? null, active_view: 'home' })
   const saveResponse = (response: string | string[]) => {
-    if (!currentQuestion) return
-    const next = { ...answersRef.current, [currentQuestion.question_id]: response }
-    answersRef.current = next
-    setSelectedAnswers(next)
+    if (!currentQuestion || remainingSeconds === 0) return
+    const existing = saveView?.answers[currentQuestion.question_id]
+    checkpointClient.current?.change({ question_id: currentQuestion.question_id,
+      selected_option_ids: Array.isArray(response) ? response : [], typed_response: typeof response === 'string' ? response : null,
+      reviewed: existing?.reviewed ?? false })
+  }
+  const toggleReview = () => {
+    if (!currentQuestion || remainingSeconds === 0) return
+    const existing = saveView?.answers[currentQuestion.question_id] ?? { question_id: currentQuestion.question_id,
+      selected_option_ids: [], typed_response: currentQuestion.question_type === 'FIB' ? '' : null, reviewed: false }
+    checkpointClient.current?.change({ ...existing, reviewed: !existing.reviewed })
   }
 
   return (
-    <div style={{ display: 'flex', height: '100%', minHeight: 0, gap: 16, color: '#33415f' }}>
+    <div className="exam-layout" style={{ display: 'flex', height: '100%', minHeight: 0, gap: 16, color: '#33415f' }}>
       <section style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', padding: 22, overflowY: 'auto', background: '#fff', border: '1px solid #e2e7f1', borderRadius: 14, boxShadow: '0 12px 35px #26375f0a' }}>
         {activeView === 'home' ? <>
           <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap', paddingBottom: 16, borderBottom: '1px solid #edf0f6' }}>
@@ -222,7 +249,7 @@ export function ExamRunner({
               <div>{section.indices.map((index, questionIndex) => {
                 const question = questions[index]
                 const response = selectedAnswers[question.question_id]
-                const answered = Array.isArray(response) ? response.length > 0 : Boolean(response)
+                const answered = hasResponse(response)
                 const flagged = Boolean(flaggedForReview[question.question_id])
                 return <button key={question.question_id} onClick={() => openQuestion(index)} style={{ width: '100%', display: 'grid', gridTemplateColumns: '36px minmax(0,1fr) auto auto', alignItems: 'center', gap: 10, padding: '10px 13px', textAlign: 'left', cursor: 'pointer', border: 0, borderBottom: questionIndex < section.indices.length - 1 ? '1px solid #eef0f5' : 0, background: '#fff' }}>
                   <span style={{ display: 'grid', width: 27, height: 27, placeItems: 'center', borderRadius: 8, background: '#f0f2fb', color: '#6779c3', fontSize: 10, fontWeight: 700 }}>{index + 1}</span>
@@ -236,18 +263,18 @@ export function ExamRunner({
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}><button onClick={() => openQuestion(currentIndex)} style={{ ...buttonStyle, background: '#6277c9', color: '#fff', borderColor: '#6277c9' }}>Continue to question {currentIndex + 1} →</button></div>
         </> : currentQuestion && <>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, paddingBottom: 14, borderBottom: '1px solid #edf0f6' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><button onClick={() => setActiveView('home')} style={{ ...buttonStyle, padding: '7px 10px', fontSize: 11 }}>← Question overview</button><div style={{ fontSize: 13, color: '#71809b' }}>Question {currentIndex + 1} of {questions.length} · {currentQuestion.marks} marks</div></div>
-          <button onClick={() => setFlaggedForReview((previous) => ({ ...previous, [currentQuestion.question_id]: !previous[currentQuestion.question_id] }))} style={{ ...buttonStyle, color: flaggedForReview[currentQuestion.question_id] ? '#b27c22' : '#65728c', background: flaggedForReview[currentQuestion.question_id] ? '#fff8e8' : '#fff' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><button onClick={openOverview} style={{ ...buttonStyle, padding: '7px 10px', fontSize: 11 }}>← Question overview</button><div style={{ fontSize: 13, color: '#71809b' }}>Question {currentIndex + 1} of {questions.length} · {currentQuestion.marks} marks</div></div>
+          <button disabled={remainingSeconds === 0 || isSubmitting || finalizing} onClick={toggleReview} style={{ ...buttonStyle, color: flaggedForReview[currentQuestion.question_id] ? '#b27c22' : '#65728c', background: flaggedForReview[currentQuestion.question_id] ? '#fff8e8' : '#fff' }}>
             {flaggedForReview[currentQuestion.question_id] ? '★ Flagged for review' : '☆ Mark for review'}
           </button>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginTop: 14 }} aria-label="Exam sections">{sections.map((section, index) => <button key={section.id} onClick={() => setCurrentIndex(section.indices[0])} aria-current={currentSection?.id === section.id ? 'step' : undefined} style={{ ...buttonStyle, padding: '7px 10px', fontSize: 10, color: currentSection?.id === section.id ? '#fff' : '#64718e', background: currentSection?.id === section.id ? '#6277c9' : '#f8f9fd', borderColor: currentSection?.id === section.id ? '#6277c9' : '#e9edf5', boxShadow: 'none' }}>Section {index + 1} · {section.name} <span style={{ opacity: .75 }}>({section.indices.length})</span></button>)}</div>
+        <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginTop: 14 }} aria-label="Exam sections">{sections.map((section, index) => <button key={section.id} onClick={() => openQuestion(section.indices[0])} aria-current={currentSection?.id === section.id ? 'step' : undefined} style={{ ...buttonStyle, padding: '7px 10px', fontSize: 10, color: currentSection?.id === section.id ? '#fff' : '#64718e', background: currentSection?.id === section.id ? '#6277c9' : '#f8f9fd', borderColor: currentSection?.id === section.id ? '#6277c9' : '#e9edf5', boxShadow: 'none' }}>Section {index + 1} · {section.name} <span style={{ opacity: .75 }}>({section.indices.length})</span></button>)}</div>
         {currentSection && <div style={{ marginTop: 18, color: '#6878b6', fontSize: 10, fontWeight: 800, letterSpacing: 1, textTransform: 'uppercase' }}>{currentSection.name}</div>}
         <h2 style={{ margin: '7px 0 10px', color: '#2d3b60', fontSize: 20 }}>{currentQuestion.title}</h2>
         <div style={{ padding: 16, borderRadius: 10, background: '#f7f8fc', border: '1px solid #edf0f6', color: '#56627b', whiteSpace: 'pre-wrap', lineHeight: 1.65 }}>{currentQuestion.statement}</div>
         <div style={{ display: 'grid', gap: 10, marginTop: 18 }}>
           {currentQuestion.question_type === 'FIB' ? <input
-            aria-label="Your answer"
+            aria-label="Your answer" disabled={remainingSeconds === 0 || isSubmitting || finalizing}
             value={typeof selectedAnswers[currentQuestion.question_id] === 'string' ? selectedAnswers[currentQuestion.question_id] as string : ''}
             onChange={(event) => saveResponse(event.target.value)}
             placeholder="Type your answer"
@@ -257,7 +284,7 @@ export function ExamRunner({
             {(currentQuestion.options ?? []).map((option, index) => {
             const existing = selectedAnswers[currentQuestion.question_id]
             const selected = Array.isArray(existing) && existing.includes(option.id)
-            return <button key={option.id} onClick={() => {
+            return <button key={option.id} disabled={remainingSeconds === 0 || isSubmitting || finalizing} onClick={() => {
               const current = Array.isArray(selectedAnswers[currentQuestion.question_id]) ? selectedAnswers[currentQuestion.question_id] as string[] : []
               saveResponse(selected ? current.filter((id) => id !== option.id) : [...current, option.id])
             }} aria-pressed={selected} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: 14, borderRadius: 10, textAlign: 'left', color: selected ? '#4058a9' : '#53617b', background: selected ? '#f0f2ff' : '#fff', border: `1px solid ${selected ? '#acb8eb' : '#e5e9f2'}`, cursor: 'pointer' }}><span style={{ width: 18, height: 18, display: 'grid', placeItems: 'center', borderRadius: 5, border: `1px solid ${selected ? '#687bc8' : '#cbd3e2'}`, color: '#fff', background: selected ? '#687bc8' : '#fff', fontSize: 12, flexShrink: 0 }}>{selected ? '✓' : ''}</span><b>{String.fromCharCode(65 + index)}.</b>{option.text}</button>
@@ -265,10 +292,10 @@ export function ExamRunner({
           </>}
         </div>
         <div style={{ marginTop: 'auto', paddingTop: 22, display: 'flex', justifyContent: 'space-between' }}>
-          <button disabled={currentIndex === 0} onClick={() => setCurrentIndex((index) => Math.max(0, index - 1))} style={{ ...buttonStyle, opacity: currentIndex === 0 ? 0.45 : 1 }}>← Previous</button>
+          <button disabled={currentIndex === 0} onClick={() => openQuestion(Math.max(0, currentIndex - 1))} style={{ ...buttonStyle, opacity: currentIndex === 0 ? 0.45 : 1 }}>← Previous</button>
           {currentIndex < questions.length - 1
-            ? <button onClick={() => setCurrentIndex((index) => Math.min(questions.length - 1, index + 1))} style={{ ...buttonStyle, background: '#6277c9', color: '#fff', borderColor: '#6277c9' }}>Next question →</button>
-            : <button onClick={() => setActiveView('home')} style={{ ...buttonStyle, background: '#6277c9', color: '#fff', borderColor: '#6277c9' }}>Back to question overview</button>}
+            ? <button onClick={() => openQuestion(Math.min(questions.length - 1, currentIndex + 1))} style={{ ...buttonStyle, background: '#6277c9', color: '#fff', borderColor: '#6277c9' }}>Next question →</button>
+            : <button onClick={openOverview} style={{ ...buttonStyle, background: '#6277c9', color: '#fff', borderColor: '#6277c9' }}>Back to question overview</button>}
         </div>
         </>}
       </section>
@@ -280,14 +307,16 @@ export function ExamRunner({
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 7 }}>
             {questions.map((question, index) => {
               const response = selectedAnswers[question.question_id]
-              const selected = Array.isArray(response) ? response.length > 0 : Boolean(response)
+              const selected = hasResponse(response)
               const flagged = Boolean(flaggedForReview[question.question_id])
               return <button key={question.question_id} onClick={() => openQuestion(index)} aria-label={`Go to question ${index + 1}${selected ? ', answered' : ''}${flagged ? ', flagged for review' : ''}`} style={{ ...buttonStyle, padding: '8px 0', fontSize: 11, background: flagged ? '#fff7e4' : selected ? '#e9f8f1' : '#f8f9fc', color: flagged ? '#a97819' : selected ? '#21835f' : '#65718a', borderColor: currentIndex === index && activeView === 'question' ? '#6c7ed0' : '#e7ebf3', outline: currentIndex === index && activeView === 'question' ? '2px solid #d5daf5' : 'none', boxShadow: 'none' }}>{index + 1}</button>
             })}
           </div>
         </div>
+        {saveView && !finalizing && <AttemptSaveStatus view={saveView} conflicts={conflictDetails} onRetry={() => void checkpointClient.current?.flush()} onResolve={keep => checkpointClient.current?.resolveConflict(keep)} />}
+        {submissionView && submissionView.status!=='idle' && submissionView.status!=='received' && <SubmissionStatus view={submissionView} onRetry={()=>void handleSubmitFinal()} />}
         {error && <div role="alert" style={{ color: '#bd4055', fontSize: 12 }}>{error}</div>}
-        <button disabled={isSubmitting} onClick={() => setSubmitModalOpen(true)} style={{ ...buttonStyle, marginTop: 'auto', background: '#218f69', color: '#fff', borderColor: '#218f69' }}>{isSubmitting ? 'Submitting…' : 'Submit assessment'}</button>
+        {submissionView?.status!=='pending' && <button disabled={isSubmitting || finalizing} onClick={() => setSubmitModalOpen(true)} style={{ ...buttonStyle, marginTop: 'auto', background: '#218f69', color: '#fff', borderColor: '#218f69' }}>{isSubmitting ? 'Submitting…' : 'Submit assessment'}</button>}
       </aside>
 
       {submitModalOpen && <div style={{ position: 'fixed', inset: 0, zIndex: 20, display: 'grid', placeItems: 'center', padding: 20, background: '#000c' }}>

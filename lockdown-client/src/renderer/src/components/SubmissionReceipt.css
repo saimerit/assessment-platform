@@ -1,0 +1,21 @@
+.submission-receipt { width: min(720px,100%); box-sizing: border-box; border: 1px solid #e0e7ee; border-radius: 18px; background: #fff; padding: 30px; color: #33415f; box-shadow: 0 20px 60px #26375f0c; }
+.submission-receipt-icon { width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; background: #e8f7ef; color: #21835f; font-size: 26px; }
+.submission-receipt-eyebrow { color: #21835f; font-weight: 750; text-transform: uppercase; letter-spacing: .8px; font-size: 11px; margin-top: 18px; }
+.submission-receipt h1 { font-size: 27px; margin: 8px 0; color: #2d3b60; }
+.submission-receipt p, .submission-status p { font-size: 13px; line-height: 1.6; color: #68758f; }
+.submission-receipt-details { margin: 24px 0; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.submission-receipt-details div { border: 1px solid #e5eaf3; border-radius: 10px; padding: 13px; min-width: 0; }
+.submission-receipt-details dt { color: #71809b; font-size: 11px; margin-bottom: 7px; }
+.submission-receipt-details dd { margin: 0; font-size: 14px; font-weight: 650; }
+.submission-receipt-details .submission-receipt-id { grid-column: 1/-1; }
+.submission-receipt-id dd { overflow-wrap: anywhere; user-select: text; font-family: Consolas,monospace; font-size: 13px; }
+.submission-receipt-actions { display: flex; flex-wrap: wrap; gap: 9px; }
+.submission-receipt button, .submission-status button { padding: 10px 13px; border: 1px solid #dce3f0; border-radius: 8px; color: #5267b1; background: #fff; cursor: pointer; font-size: 12px; font-weight: 650; }
+.submission-receipt button:focus-visible, .submission-status button:focus-visible { outline: 3px solid #8ba0ec; outline-offset: 3px; }
+.submission-receipt .submission-exit { background: #218f69; border-color: #218f69; color: #fff; }
+.submission-deadline-note, .submission-status { padding: 13px; border: 1px solid #f1dfb6; background: #fff8e8; border-radius: 10px; }
+.submission-status strong { font-size: 12px; color: #946521; }
+.submission-close-note { margin: 18px 0; padding: 14px; border: 1px solid #dce8f6; background: #f5f8ff; border-radius: 10px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.submission-close-note p { margin: 0; }
+.submission-close-note strong { color: #40569f; font-size: 22px; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+@media(max-width:560px){ .submission-receipt { padding: 20px; } .submission-receipt-details { grid-template-columns: 1fr; } .submission-receipt-actions button { width: 100%; } }

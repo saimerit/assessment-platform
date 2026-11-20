@@ -7,3 +7,7 @@
 **/.git
 lockdown-client
 *.log
+.attempt-access-review
+**/*.log
+**/.env
+**/.env.*

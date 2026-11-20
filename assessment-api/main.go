@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -19,15 +20,19 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
+	"os"
+	"os/signal"
+	"syscall"
 )
 
 type Server struct {
-	db     *pgxpool.Pool
-	rdb    *redis.Client
-	mqChan *amqp.Channel
+	db       *pgxpool.Pool
+	rdb      *redis.Client
+	messages messagePublisher
+	attempts *attemptAccessService
+	limits   requestLimitStore
 }
 
 type CandidateIntakeField struct {
@@ -53,11 +58,13 @@ type SubmissionPayload struct {
 }
 
 type AssessmentSubmittedEvent struct {
-	InstanceID  string    `json:"instance_id"`
-	SessionID   string    `json:"session_id,omitempty"`
-	StudentID   string    `json:"student_id"`
-	BlueprintID string    `json:"blueprint_id"`
-	SubmittedAt time.Time `json:"submitted_at"`
+	SubmissionID string    `json:"submission_id,omitempty"`
+	Version      int       `json:"version,omitempty"`
+	InstanceID   string    `json:"instance_id"`
+	SessionID    string    `json:"session_id,omitempty"`
+	StudentID    string    `json:"student_id"`
+	BlueprintID  string    `json:"blueprint_id"`
+	SubmittedAt  time.Time `json:"submitted_at"`
 }
 
 func firstOptionID(optionIDs []string) string {
@@ -105,10 +112,10 @@ type DispatchedInvitation struct {
 }
 
 type ProctorIncidentPayload struct {
-	BlueprintID     string          `json:"blueprint_id" binding:"required"`
-	StudentID       string          `json:"student_id" binding:"required"`
-	ViolationType   string          `json:"violation_type" binding:"required"`
-	ReportedBy      string          `json:"reported_by" binding:"required"` // e.g. "CLIENT_LOCKDOWN"
+	BlueprintID     string          `json:"blueprint_id"`
+	StudentID       string          `json:"student_id"`
+	ViolationType   string          `json:"violation_type" binding:"required,max=64"`
+	ReportedBy      string          `json:"reported_by"`
 	EvidencePayload json.RawMessage `json:"evidence_payload"`
 }
 
@@ -182,78 +189,31 @@ func main() {
 	}
 
 	// 3. RabbitMQ Connection & Queue Declarations
-	var mqConn *amqp.Connection
-	for attempt := 1; ; attempt++ {
-		mqConn, err = amqp.Dial(cfg.RabbitMQURL)
-		if err == nil {
-			break
-		}
-		log.Printf("RabbitMQ not ready (attempt %d): %v; retrying in 2 seconds", attempt, err)
-		time.Sleep(2 * time.Second)
-	}
-	defer mqConn.Close()
-
-	mqChan, err := mqConn.Channel()
-	if err != nil {
-		log.Fatalf("Unable to open RabbitMQ channel: %v\n", err)
-	}
-	defer mqChan.Close()
-
-	// Evaluation queue
-	_, err = mqChan.QueueDeclare(
-		"assessment_submissions",
-		true,
-		false,
-		false,
-		false,
-		nil,
-	)
-	if err != nil {
-		log.Fatalf("Failed to declare evaluation queue: %v\n", err)
-	}
-
-	// Notification events queue
-	_, err = mqChan.QueueDeclare(
-		"notification_events",
-		true,
-		false,
-		false,
-		false,
-		nil,
-	)
-	if err != nil {
-		log.Fatalf("Failed to declare notification queue: %v\n", err)
-	}
-
-	srv := &Server{db: dbpool, rdb: rdb, mqChan: mqChan}
+	publisher := &RabbitPublisher{url: cfg.RabbitMQURL}
+	defer publisher.Close()
+	jobsCtx, stopJobs := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopJobs()
+	srv := &Server{db: dbpool, rdb: rdb, messages: publisher,
+		attempts: &attemptAccessService{repository: postgresAttemptRepository{dbpool}, secret: middleware.JWTSecret, now: time.Now},
+		limits:   redisRequestLimitStore{rdb}}
 
 	// 4. Gin Router Setup
+	srv.runSubmissionJobs(jobsCtx)
 	r := gin.Default()
+	// Do not let an untrusted X-Forwarded-For header bypass IP rate limits.
+	_ = r.SetTrustedProxies(nil)
 	r.Use(corsMiddleware())
 	r.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
 
 	// Public Auth Endpoint
-	r.POST("/api/auth/login", srv.handleLogin)
+	r.POST("/api/auth/login", limitRequestBody(4096), srv.limitLoginIP, srv.handleLogin)
 	r.GET("/api/auth/candidate-invitations/:token", srv.GetCandidateOrgInvitation)
 	r.POST("/api/auth/candidate-invitations/:token/register", srv.RegisterInvitedCandidate)
 
-	// Public or Client-authenticated incident stream from Electron
-	r.POST("/api/proctor/incidents", srv.ReportIncident)
 	// Candidate gateway only returns the minimum information needed to verify an invitation.
 	r.GET("/api/exg/:token", srv.HandleExamGateway)
 	r.GET("/api/system/client-version", srv.GetClientVersion)
-	r.GET("/api/exam/sessions/:session_id/questions", srv.FetchSessionQuestions)
-	r.POST("/api/exam/sessions/:session_id/unlock", srv.VerifyExamUnlock)
-	r.POST("/api/exam/sessions/:session_id/start", srv.BeginExamSession)
-	r.POST("/api/exam/sessions/:session_id/submit", srv.SubmitSession)
-
-	// Assessment Execution Routes (Used by Lockdown Desktop Client)
-	api := r.Group("/api/assessments")
-	{
-		api.POST("/:id/verify-passcode", srv.VerifyPasscode)
-		api.POST("/:id/start", srv.StartAssessment)
-		api.POST("/:id/submit", srv.SubmitAssessment)
-	}
+	srv.registerAttemptRoutes(r)
 
 	// Authenticated Management Routes (Admin, Recruiter & Proctoring)
 	auth := r.Group("/api")
@@ -321,34 +281,36 @@ func main() {
 	}
 
 	log.Printf("Assessment API running on :%s", cfg.Port)
-	if err := r.Run(":" + cfg.Port); err != nil {
+	httpServer := &http.Server{Addr: ":" + cfg.Port, Handler: r, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		<-jobsCtx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = httpServer.Shutdown(shutdownCtx)
+	}()
+	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("Assessment API failed to start: %v", err)
 	}
 }
 
 // GetCandidateAssessments returns the authenticated candidate's assignments,
-// schedules, and their own graded scores (when available).
+// schedules. Results remain confidential until an explicit publication workflow
+// releases them; automatic grading never grants candidate visibility.
 func (s *Server) GetCandidateAssessments(c *gin.Context) {
 	rows, err := s.db.Query(c.Request.Context(), `
 		SELECT i.invitation_token, i.blueprint_id::text, b.title, i.scheduled_start, i.scheduled_end,
-		       COALESCE(cai.status,i.status), 'BLUEPRINT'::text, NULL::text,
-		       COALESCE(cr.total_score,-1), COALESCE(cr.max_score,-1),
-		       COALESCE(cr.evaluated_at,'epoch'::timestamptz)
+		       CASE WHEN cai.status='EVALUATED' THEN 'SUBMITTED' ELSE COALESCE(cai.status,i.status) END, 'BLUEPRINT'::text, NULL::text
 		FROM assessment_invitations i
 		JOIN assessment_blueprints b ON i.blueprint_id = b.id
 		LEFT JOIN candidate_assessment_instances cai ON cai.blueprint_id=i.blueprint_id AND cai.student_id=i.student_id
-		LEFT JOIN candidate_results cr ON cr.instance_id=cai.id
-		WHERE i.student_id = $1
+		WHERE i.student_id = $1 AND b.org_id=$2
 		UNION ALL
 		SELECT cs.invitation_token, cs.assessment_id::text, e.title, e.scheduled_start, e.scheduled_end,
-		       cs.status, 'EVENT'::text, e.mode,
-		       COALESCE(csr.score_obtained,-1), COALESCE(csr.max_score,-1),
-		       COALESCE(csr.evaluated_at,'epoch'::timestamptz)
+		       CASE WHEN cs.status='EVALUATED' THEN 'SUBMITTED' ELSE cs.status END, 'EVENT'::text, e.mode
 		FROM candidate_sessions cs
 		JOIN assessment_events e ON e.id=cs.assessment_id
-		LEFT JOIN candidate_session_results csr ON csr.session_id=cs.id
-		WHERE cs.student_id=$1
-		ORDER BY 4 ASC`, c.GetString("user_id"))
+		WHERE cs.student_id=$1 AND e.org_id=$2
+		ORDER BY 4 ASC`, c.GetString("user_id"), c.GetString("org_id"))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query assigned assessments"})
 		return
@@ -360,9 +322,7 @@ func (s *Server) GetCandidateAssessments(c *gin.Context) {
 		var token, assessmentID, title, status, assessmentType string
 		var mode *string
 		var start, end time.Time
-		var score, maxScore float64
-		var evaluatedAt time.Time
-		if err := rows.Scan(&token, &assessmentID, &title, &start, &end, &status, &assessmentType, &mode, &score, &maxScore, &evaluatedAt); err != nil {
+		if err := rows.Scan(&token, &assessmentID, &title, &start, &end, &status, &assessmentType, &mode); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read assigned assessments"})
 			return
 		}
@@ -375,9 +335,6 @@ func (s *Server) GetCandidateAssessments(c *gin.Context) {
 			"scheduled_end":    end,
 			"status":           status,
 			"proctoring_mode":  mode,
-			"score":            score,
-			"max_score":        maxScore,
-			"evaluated_at":     evaluatedAt,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -421,9 +378,18 @@ func (s *Server) ReportIncident(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	a := currentAttempt(c)
+	if (req.BlueprintID != "" && req.BlueprintID != a.AssessmentID) || (req.StudentID != "" && req.StudentID != a.StudentID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Incident identity does not match the authorized attempt"})
+		return
+	}
+	if a.Status != "IN_PROGRESS" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Incident reporting requires an unlocked active attempt"})
+		return
+	}
+	req.BlueprintID, req.StudentID, req.ReportedBy = a.AssessmentID, a.StudentID, "ELECTRON_LOCKDOWN_CLIENT"
 
-	var isEvent bool
-	if err := s.db.QueryRow(c.Request.Context(), `SELECT EXISTS(SELECT 1 FROM assessment_events WHERE id=$1)`, req.BlueprintID).Scan(&isEvent); err == nil && isEvent {
+	if a.Kind == attemptSession {
 		_, err := s.db.Exec(c.Request.Context(), `INSERT INTO assessment_event_incidents (assessment_id,student_id,reported_by,violation_type,evidence_payload) VALUES ($1,$2,$3,$4,$5)`, req.BlueprintID, req.StudentID, req.ReportedBy, req.ViolationType, req.EvidencePayload)
 		if err != nil {
 			log.Printf("Failed to record assessment event incident: %v", err)
@@ -635,6 +601,9 @@ func (s *Server) handleLogin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format"})
 		return
 	}
+	if !s.allowLoginAccount(c, req.Email) {
+		return
+	}
 
 	var userID, orgID, passwordHash, fullName, role, registrationStatus string
 	query := `SELECT id, COALESCE(org_id::text, ''), password_hash, full_name, role, registration_status FROM users WHERE lower(email) = lower($1)`
@@ -682,33 +651,19 @@ func (s *Server) VerifyPasscode(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Passcode is required"})
 		return
 	}
-
-	var scheduledStart, scheduledEnd time.Time
-	err := s.db.QueryRow(c.Request.Context(), `
-		SELECT scheduled_start, scheduled_end
-		FROM assessment_invitations
-		WHERE blueprint_id = $1
-		  AND (NULLIF($2, '')::uuid IS NULL OR student_id = NULLIF($2, '')::uuid)
-		  AND status = 'INVITED'
-		ORDER BY scheduled_start ASC
-		LIMIT 1`, assessmentID, req.StudentID).Scan(&scheduledStart, &scheduledEnd)
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			c.JSON(http.StatusForbidden, gin.H{"error": "No active invitation exists for this assessment"})
-		} else {
-			log.Printf("[Passcode] Unable to load assessment schedule: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Unable to verify assessment schedule"})
-		}
+	a := currentAttempt(c)
+	if !allowAttemptCandidate(c, req.StudentID) {
 		return
 	}
+	req.StudentID = a.StudentID
 
 	now := time.Now()
-	if now.Before(scheduledStart) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Assessment window has not opened yet"})
-		return
+	lifecycle, err := loadLifecycle(c.Request.Context(), s.db, a, false)
+	if err == nil {
+		err = lifecycle.validate(now, false)
 	}
-	if !now.Before(scheduledEnd) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Assessment time window has expired"})
+	if err != nil {
+		respondAttemptError(c, err)
 		return
 	}
 
@@ -722,7 +677,7 @@ func (s *Server) VerifyPasscode(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Unable to verify passcode"})
 		return
 	}
-	validCode := err == nil && activeCode != "" && activeCode == req.Passcode
+	validCode := err == nil && activeCode != "" && constantTimeCodeEqual(activeCode, req.Passcode)
 
 	// Preserve the individual passcode sent in each candidate invitation email.
 	if !validCode && req.StudentID != "" {
@@ -732,7 +687,7 @@ func (s *Server) VerifyPasscode(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Unable to verify passcode"})
 			return
 		}
-		validCode = candidateErr == nil && candidateCode != "" && candidateCode == req.Passcode
+		validCode = candidateErr == nil && candidateCode != "" && constantTimeCodeEqual(candidateCode, req.Passcode)
 	}
 	if !validCode {
 		log.Printf("[Passcode] Verification rejected for assessment %s", assessmentID)
@@ -740,241 +695,34 @@ func (s *Server) VerifyPasscode(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	tag, err := s.db.Exec(ctx, `UPDATE assessment_invitations SET unlocked_at=COALESCE(unlocked_at,$2) WHERE id=$1 AND status='INVITED'`, a.ID, now)
+	if err != nil || tag.RowsAffected() != 1 {
+		c.JSON(http.StatusConflict, gin.H{"error": "Unable to unlock this invitation"})
+		return
+	}
+	a.UnlockedAt = &now
+	s.respondAttemptCredentials(c, a, gin.H{
 		"status":        "PASSCODE_VERIFIED",
 		"assessment_id": assessmentID,
 		"verified_at":   now.Format(time.RFC3339),
 	})
 }
 
-// Start Assessment & Persist Deterministic Paper
+// Legacy adapters retain their route shapes and use the shared lifecycle/save rules.
 func (s *Server) StartAssessment(c *gin.Context) {
-	ctx := c.Request.Context()
-	blueprintID := c.Param("id")
-
 	var req struct {
-		StudentID string `json:"student_id" binding:"required"`
+		StudentID string `json:"student_id"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	if c.ShouldBindJSON(&req) != nil {
+		respondAttemptError(c, attemptError(400, "Invalid start request"))
 		return
 	}
-	var scheduledStart, scheduledEnd time.Time
-	err := s.db.QueryRow(ctx, `SELECT scheduled_start,scheduled_end FROM assessment_invitations WHERE blueprint_id=$1 AND student_id=$2 AND status='INVITED' ORDER BY scheduled_start LIMIT 1`, blueprintID, req.StudentID).Scan(&scheduledStart, &scheduledEnd)
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": "No active invitation exists for this assessment"})
+	if !allowAttemptCandidate(c, req.StudentID) {
 		return
 	}
-	now := time.Now()
-	if now.Before(scheduledStart) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Assessment window has not opened yet"})
-		return
-	}
-	if !now.Before(scheduledEnd) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Assessment time window has expired"})
-		return
-	}
-
-	var instanceID string
-	var status string
-	err = s.db.QueryRow(ctx, `
-		SELECT id, status FROM candidate_assessment_instances 
-		WHERE blueprint_id = $1 AND student_id = $2`, blueprintID, req.StudentID).Scan(&instanceID, &status)
-
-	if err == nil {
-		questions, fetchErr := s.fetchInstanceQuestions(ctx, instanceID)
-		if fetchErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fetchErr.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"instance_id": instanceID, "status": status, "questions": questions})
-		return
-	}
-	if err != pgx.ErrNoRows {
-		log.Printf("[Assessment] Failed to look up existing instance: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Unable to load assessment instance"})
-		return
-	}
-
-	questionIDs, genErr := s.generatePaper(ctx, blueprintID, req.StudentID)
-	if genErr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": genErr.Error()})
-		return
-	}
-
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
-		return
-	}
-	defer tx.Rollback(ctx)
-
-	err = tx.QueryRow(ctx, `
-		INSERT INTO candidate_assessment_instances (blueprint_id, student_id, status)
-		VALUES ($1, $2, 'IN_PROGRESS')
-		ON CONFLICT (blueprint_id, student_id) DO NOTHING
-		RETURNING id`, blueprintID, req.StudentID).Scan(&instanceID)
-	if err == pgx.ErrNoRows {
-		// Another start request won the unique-key race. Reuse its committed instance.
-		_ = tx.Rollback(ctx)
-		err = s.db.QueryRow(ctx, `
-			SELECT id, status FROM candidate_assessment_instances
-			WHERE blueprint_id = $1 AND student_id = $2`, blueprintID, req.StudentID).Scan(&instanceID, &status)
-		if err != nil {
-			log.Printf("[Assessment] Failed to load instance after concurrent start: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Unable to load assessment instance"})
-			return
-		}
-		questions, fetchErr := s.fetchInstanceQuestions(ctx, instanceID)
-		if fetchErr != nil {
-			log.Printf("[Assessment] Failed to load questions for existing instance: %v", fetchErr)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Unable to load assessment questions"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"instance_id": instanceID, "status": status, "questions": questions})
-		return
-	}
-	if err != nil {
-		log.Printf("[Assessment] Failed to create instance: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create assessment instance"})
-		return
-	}
-
-	for order, qID := range questionIDs {
-		_, err = tx.Exec(ctx, `
-			INSERT INTO instance_questions (instance_id, question_id, display_order)
-			VALUES ($1, $2, $3)
-			ON CONFLICT (instance_id, question_id) DO NOTHING`, instanceID, qID, order+1)
-		if err != nil {
-			log.Printf("Error mapping question %s to instance %s: %v", qID, instanceID, err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to map question: %v", err)})
-			return
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction commit failed"})
-		return
-	}
-
-	questions, err := s.fetchInstanceQuestions(ctx, instanceID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"instance_id": instanceID, "status": "IN_PROGRESS", "questions": questions})
+	s.startAttempt(c)
 }
-
-// Submit Assessment & Publish Event to RabbitMQ
-func (s *Server) SubmitAssessment(c *gin.Context) {
-	ctx := c.Request.Context()
-	blueprintID := c.Param("id")
-
-	var req SubmissionPayload
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	var instanceID string
-	err := s.db.QueryRow(ctx, `
-		SELECT id FROM candidate_assessment_instances 
-		WHERE blueprint_id = $1 AND student_id = $2 AND status = 'IN_PROGRESS'`,
-		blueprintID, req.StudentID).Scan(&instanceID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "No active test session found"})
-		return
-	}
-
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
-		return
-	}
-	defer tx.Rollback(ctx)
-
-	for _, ans := range req.Answers {
-		var qType string
-		if err = tx.QueryRow(ctx, `SELECT q.q_type FROM instance_questions iq JOIN questions q ON q.id=iq.question_id WHERE iq.instance_id=$1 AND q.id=$2`, instanceID, ans.QuestionID).Scan(&qType); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Answer includes a question outside this paper"})
-			return
-		}
-		optionIDs := ans.OptionIDs
-		if len(optionIDs) == 0 && ans.OptionID != "" {
-			optionIDs = []string{ans.OptionID}
-		}
-		if (qType == "MCQ" && (len(optionIDs) == 0 || ans.TypedResponse != nil)) || (qType == "FIB" && (ans.TypedResponse == nil || len(optionIDs) > 0 || ans.OptionID != "")) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Answer format does not match question type"})
-			return
-		}
-		if qType == "MCQ" {
-			seen := make(map[string]bool, len(optionIDs))
-			for _, optionID := range optionIDs {
-				var optionBelongsToQuestion bool
-				if seen[optionID] || optionID == "" {
-					c.JSON(http.StatusBadRequest, gin.H{"error": "Selected options must be unique"})
-					return
-				}
-				seen[optionID] = true
-				if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mcq_options WHERE id=$1 AND question_id=$2)`, optionID, ans.QuestionID).Scan(&optionBelongsToQuestion); err != nil || !optionBelongsToQuestion {
-					c.JSON(http.StatusBadRequest, gin.H{"error": "Selected option does not belong to question"})
-					return
-				}
-			}
-		}
-		_, err = tx.Exec(ctx, `
-			INSERT INTO candidate_answers (instance_id, question_id, selected_option_id, selected_option_ids, typed_response)
-			VALUES ($1, $2, NULLIF($3, '')::uuid, NULLIF(ARRAY(SELECT unnest($4::text[])::uuid), '{}'::uuid[]), $5)
-			ON CONFLICT (instance_id, question_id) 
-			DO UPDATE SET selected_option_id = EXCLUDED.selected_option_id, selected_option_ids = EXCLUDED.selected_option_ids, typed_response = EXCLUDED.typed_response, answered_at = NOW()`,
-			instanceID, ans.QuestionID, firstOptionID(optionIDs), optionIDs, ans.TypedResponse)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist answers"})
-			return
-		}
-	}
-
-	_, err = tx.Exec(ctx, `UPDATE candidate_assessment_instances SET status = 'SUBMITTED' WHERE id = $1`, instanceID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update session status"})
-		return
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Commit failure"})
-		return
-	}
-
-	event := AssessmentSubmittedEvent{
-		InstanceID:  instanceID,
-		StudentID:   req.StudentID,
-		BlueprintID: blueprintID,
-		SubmittedAt: time.Now(),
-	}
-	eventBytes, _ := json.Marshal(event)
-
-	err = s.mqChan.PublishWithContext(ctx,
-		"",
-		"assessment_submissions",
-		false,
-		false,
-		amqp.Publishing{
-			ContentType:  "application/json",
-			DeliveryMode: amqp.Persistent,
-			Body:         eventBytes,
-		},
-	)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to queue evaluation event"})
-		return
-	}
-
-	c.JSON(http.StatusAccepted, gin.H{
-		"message":     "Submission received and queued for grading",
-		"instance_id": instanceID,
-	})
-}
+func (s *Server) SubmitAssessment(c *gin.Context) { s.submitAttempt(c) }
 
 // Handle Batch Invites for Candidates
 func (s *Server) HandleBatchInvite(c *gin.Context) {
@@ -1081,17 +829,7 @@ func (s *Server) HandleBatchInvite(c *gin.Context) {
 		}
 
 		bodyBytes, _ := json.Marshal(eventPayload)
-		err = s.mqChan.PublishWithContext(ctx,
-			"",
-			"notification_events",
-			false,
-			false,
-			amqp.Publishing{
-				ContentType:  "application/json",
-				DeliveryMode: amqp.Persistent,
-				Body:         bodyBytes,
-			},
-		)
+		err = s.messages.Publish(ctx, "notification_events", newCheckpointUpdateID(), bodyBytes)
 		if err != nil {
 			log.Printf("Failed to publish RabbitMQ event for %s: %v", cand.Email, err)
 		}
@@ -1161,32 +899,37 @@ func (s *Server) HandleExamGateway(c *gin.Context) {
 	// Event invitations use candidate_sessions; keep the legacy blueprint
 	// invitation query below intact for already-issued links.
 	var eventCandidate ExamGatewayResponse
+	var eventStatus string
 	err := s.db.QueryRow(c.Request.Context(), `
 		SELECT cs.assessment_id::text, cs.id::text, cs.student_id::text, cs.paper_id::text,
-		       ap.paper_code, ap.set_name, cs.started_at, u.full_name, u.email, e.title,
-	       e.scheduled_start, e.scheduled_end, e.mode, e.duration_minutes
+		       ap.paper_code, ap.set_name, cs.started_at, cs.timer_expires_at, u.full_name, u.email, e.title,
+	       e.scheduled_start, e.scheduled_end, e.mode, e.duration_minutes, cs.status
 		FROM candidate_sessions cs
 		JOIN assessment_events e ON e.id=cs.assessment_id
 		JOIN assessment_papers ap ON ap.id=cs.paper_id
 		JOIN users u ON u.id=cs.student_id
-		WHERE cs.invitation_token=$1 AND cs.status IN ('INVITED','IN_PROGRESS')`, token).Scan(
+		WHERE cs.invitation_token=$1 AND cs.status IN ('INVITED','IN_PROGRESS','SUBMITTED','EVALUATED')`, token).Scan(
 		&eventCandidate.AssessmentID, &eventCandidate.SessionID, &eventCandidate.StudentID, &eventCandidate.PaperID,
-		&eventCandidate.PaperCode, &eventCandidate.PaperSetName, &eventCandidate.StartedAt,
+		&eventCandidate.PaperCode, &eventCandidate.PaperSetName, &eventCandidate.StartedAt, &eventCandidate.TimerExpiresAt,
 		&eventCandidate.CandidateName, &eventCandidate.Email, &eventCandidate.ExamTitle,
-		&eventCandidate.ScheduledStart, &eventCandidate.ScheduledEnd, &eventCandidate.ProctoringMode, &eventCandidate.DurationMinutes)
+		&eventCandidate.ScheduledStart, &eventCandidate.ScheduledEnd, &eventCandidate.ProctoringMode, &eventCandidate.DurationMinutes, &eventStatus)
 	if err == nil {
 		now := time.Now().UTC()
 		eventCandidate.ServerTime = now
 		eventCandidate.WindowStatus = examWindowStatus(now, eventCandidate.ScheduledStart, eventCandidate.ScheduledEnd)
-		if eventCandidate.StartedAt != nil {
-			expiresAt := eventCandidate.StartedAt.Add(time.Duration(eventCandidate.DurationMinutes) * time.Minute)
-			eventCandidate.TimerExpiresAt = &expiresAt
-			if now.Before(expiresAt) {
+		if eventCandidate.StartedAt != nil && eventCandidate.TimerExpiresAt != nil {
+			eventCandidate.DurationMinutes = int(eventCandidate.TimerExpiresAt.Sub(*eventCandidate.StartedAt) / time.Minute)
+			eventCandidate.WindowStatus = "EXPIRED"
+			if now.Before(*eventCandidate.TimerExpiresAt) {
 				eventCandidate.WindowStatus = "IN_PROGRESS"
 			}
 		}
+
+		if eventStatus == "SUBMITTED" || eventStatus == "EVALUATED" {
+			eventCandidate.WindowStatus = "SUBMITTED"
+		}
 		eventCandidate.BlueprintID = eventCandidate.AssessmentID
-		eventCandidate.MinClientVersion = "1.0.0"
+		eventCandidate.MinClientVersion = attemptAuthClientVersion
 		eventCandidate.LatestClientURL = clientReleaseURL()
 		eventCandidate.IntakeFields = json.RawMessage(`[]`)
 		eventCandidate.Sections, err = s.loadExamSectionOverview(c, eventCandidate.SessionID)
@@ -1207,15 +950,17 @@ func (s *Server) HandleExamGateway(c *gin.Context) {
 			b.title, 
 			i.scheduled_start, 
 			i.scheduled_end,
-			COALESCE(b.min_client_version, '1.0.0'),
+			COALESCE(b.min_client_version, '1.0.0'), b.duration_minutes, ai.started_at, ai.timer_expires_at, COALESCE(ai.status,i.status),
 			COALESCE((SELECT cr.download_url FROM client_releases cr ORDER BY cr.released_at DESC LIMIT 1),
 				$2)
 		FROM assessment_invitations i
 		JOIN users u ON u.id = i.student_id
 		JOIN assessment_blueprints b ON b.id = i.blueprint_id
-		WHERE i.invitation_token = $1 AND i.status = 'INVITED'`
+		LEFT JOIN candidate_assessment_instances ai ON ai.blueprint_id=i.blueprint_id AND ai.student_id=i.student_id
+		WHERE (ai.status IS NULL OR ai.status IN ('IN_PROGRESS','SUBMITTED','EVALUATED')) AND i.invitation_token = $1 AND i.status = 'INVITED'`
 
 	var candidate ExamGatewayResponse
+	var legacyStatus string
 	err = s.db.QueryRow(c.Request.Context(), query, token, clientReleaseURL()).Scan(
 		&candidate.BlueprintID,
 		&candidate.StudentID,
@@ -1224,7 +969,7 @@ func (s *Server) HandleExamGateway(c *gin.Context) {
 		&candidate.ExamTitle,
 		&candidate.ScheduledStart,
 		&candidate.ScheduledEnd,
-		&candidate.MinClientVersion,
+		&candidate.MinClientVersion, &candidate.DurationMinutes, &candidate.StartedAt, &candidate.TimerExpiresAt, &legacyStatus,
 		&candidate.LatestClientURL,
 	)
 
@@ -1233,9 +978,21 @@ func (s *Server) HandleExamGateway(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Invitation not found or no longer available"})
 		return
 	}
+	candidate.MinClientVersion = requiredAttemptClientVersion(candidate.MinClientVersion)
 	now := time.Now().UTC()
 	candidate.ServerTime = now
 	candidate.WindowStatus = examWindowStatus(now, candidate.ScheduledStart, candidate.ScheduledEnd)
+	if candidate.StartedAt != nil && candidate.TimerExpiresAt != nil {
+		candidate.DurationMinutes = int(candidate.TimerExpiresAt.Sub(*candidate.StartedAt) / time.Minute)
+		candidate.WindowStatus = "EXPIRED"
+		if now.Before(*candidate.TimerExpiresAt) {
+			candidate.WindowStatus = "IN_PROGRESS"
+		}
+	}
+
+	if legacyStatus == "SUBMITTED" || legacyStatus == "EVALUATED" {
+		candidate.WindowStatus = "SUBMITTED"
+	}
 
 	// Default intake schema (Can later be pulled from an org setting once migrated)
 	defaultIntake := `[
@@ -1249,14 +1006,14 @@ func (s *Server) HandleExamGateway(c *gin.Context) {
 }
 
 func (s *Server) loadExamSectionOverview(c *gin.Context, sessionID string) ([]ExamSectionOverview, error) {
-	rows, err := s.db.Query(c.Request.Context(), `
-		SELECT COALESCE(q.bank_id::text,''), COALESCE(b.name,'Assessment questions'), q.q_type, q.marks
-		FROM candidate_sessions cs
-		JOIN paper_questions pq ON pq.paper_id=cs.paper_id
-		JOIN questions q ON q.id=pq.question_id
-		LEFT JOIN question_banks b ON b.id=q.bank_id
-		WHERE cs.id=$1
-		ORDER BY MIN(pq.sort_order) OVER (PARTITION BY COALESCE(q.bank_id::text,'')), pq.sort_order`, sessionID)
+	rows, err := s.db.Query(c.Request.Context(), `WITH content AS (
+ SELECT q->>'section_id' AS bank,q->>'section_name' AS name,q->>'question_type' AS qtype,(q->>'marks')::int AS marks,(q->>'display_order')::int AS position
+ FROM attempt_paper_snapshots snapshot CROSS JOIN jsonb_array_elements(snapshot.questions) q WHERE snapshot.session_id=$1
+ UNION ALL
+ SELECT COALESCE(q.bank_id::text,''),COALESCE(b.name,'Assessment questions'),q.q_type,q.marks,pq.sort_order
+ FROM candidate_sessions cs JOIN paper_questions pq ON pq.paper_id=cs.paper_id JOIN questions q ON q.id=pq.question_id LEFT JOIN question_banks b ON b.id=q.bank_id
+ WHERE cs.id=$1 AND NOT EXISTS(SELECT 1 FROM attempt_paper_snapshots WHERE session_id=$1)
+ ) SELECT bank,name,qtype,marks FROM content ORDER BY MIN(position) OVER(PARTITION BY bank),position`, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -1299,8 +1056,8 @@ func generatePasscode() string {
 	return fmt.Sprintf("OA-%s", string(b))
 }
 
-func (s *Server) generatePaper(ctx context.Context, blueprintID, studentID string) ([]string, error) {
-	rows, err := s.db.Query(ctx, `
+func generatePaper(ctx context.Context, db attemptDB, blueprintID, studentID string) ([]string, error) {
+	rows, err := db.Query(ctx, `
 		SELECT topic_id, difficulty, question_count 
 		FROM blueprint_rules 
 		WHERE blueprint_id = $1`, blueprintID)
@@ -1321,6 +1078,10 @@ func (s *Server) generatePaper(ctx context.Context, blueprintID, studentID strin
 		}
 		rules = append(rules, r)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
 
 	hasher := sha256.New()
 	hasher.Write([]byte(blueprintID + ":" + studentID))
@@ -1330,11 +1091,15 @@ func (s *Server) generatePaper(ctx context.Context, blueprintID, studentID strin
 	var selected []string
 
 	for _, r := range rules {
-		qRows, err := s.db.Query(ctx, `
+		qRows, err := db.Query(ctx, `
 			SELECT q.id FROM questions q
 			JOIN subcategories s ON q.subcategory_id = s.id
-			WHERE s.topic_id = $1 AND q.difficulty = $2
-			ORDER BY q.id ASC`, r.topicID, r.difficulty)
+			JOIN topics t ON t.id=s.topic_id
+			JOIN assessment_blueprints bp ON bp.id=$3
+			LEFT JOIN question_banks bank ON bank.id=q.bank_id
+			WHERE s.topic_id = $1 AND q.difficulty = $2 AND t.org_id=bp.org_id
+			AND (q.bank_id IS NULL OR bank.org_id=bp.org_id)
+			ORDER BY q.id ASC`, r.topicID, r.difficulty, blueprintID)
 		if err != nil {
 			return nil, err
 		}
@@ -1345,6 +1110,10 @@ func (s *Server) generatePaper(ctx context.Context, blueprintID, studentID strin
 			if err := qRows.Scan(&qID); err == nil {
 				pool = append(pool, qID)
 			}
+		}
+		if err := qRows.Err(); err != nil {
+			qRows.Close()
+			return nil, err
 		}
 		qRows.Close()
 

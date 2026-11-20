@@ -12,7 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
-	amqp "github.com/rabbitmq/amqp091-go"
+
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -110,7 +110,7 @@ func (s *Server) InviteCandidatesToOrganization(c *gin.Context) {
 		registrationURL := appURL + "/register/" + invite.token
 		payload := NotificationEventPayload{Event: "CANDIDATE_ORG_INVITE", RecipientEmail: invite.email, CandidateName: invite.name, ExamTitle: orgName, InvitationURL: registrationURL}
 		body, _ := json.Marshal(payload)
-		if err := s.mqChan.PublishWithContext(ctx, "", "notification_events", false, false, amqp.Publishing{ContentType: "application/json", DeliveryMode: amqp.Persistent, Body: body}); err == nil {
+		if err := s.messages.Publish(ctx, "notification_events", newCheckpointUpdateID(), body); err == nil {
 			queuedCount++
 		}
 		for _, row := range invites {

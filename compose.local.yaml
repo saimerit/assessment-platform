@@ -1,5 +1,12 @@
 name: assessment-platform-local
 
+x-worker-settings: &worker-settings
+  WORKER_MAX_ATTEMPTS: ${WORKER_MAX_ATTEMPTS:-5}
+  WORKER_PROCESSING_TIMEOUT: ${WORKER_PROCESSING_TIMEOUT:-15s}
+  WORKER_RETRY_DELAYS: ${WORKER_RETRY_DELAYS:-2s,10s,30s,60s}
+  WORKER_QUEUE_AGE_WARNING: ${WORKER_QUEUE_AGE_WARNING:-5m}
+  RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -67,7 +74,7 @@ services:
       - sh
       - -ec
       - |
-        for migration in /migrations/03_enterprise_rbac_and_invites.sql /migrations/04_candidate_intake_config.sql /migrations/05_question_authoring_and_client_releases.sql /migrations/06_secure_assessment_events.sql /migrations/07_candidate_org_invitations.sql /migrations/08_multi_choice_answers.sql /migrations/09_randomized_event_papers.sql; do
+        for migration in /migrations/03_enterprise_rbac_and_invites.sql /migrations/04_candidate_intake_config.sql /migrations/05_question_authoring_and_client_releases.sql /migrations/06_secure_assessment_events.sql /migrations/07_candidate_org_invitations.sql /migrations/08_multi_choice_answers.sql /migrations/09_randomized_event_papers.sql /migrations/10_attempt_authorization.sql /migrations/11_attempt_checkpoints.sql /migrations/12_submission_delivery.sql /migrations/13_worker_recovery.sql; do
           psql -h postgres -U root -d assessment_db -v ON_ERROR_STOP=1 -f "$$migration"
         done
 
@@ -118,7 +125,9 @@ services:
       - ./ops/caddy/Caddyfile.local:/etc/caddy/Caddyfile:ro
 
   grading-worker:
-    build: ./grading-worker
+    build:
+      context: .
+      dockerfile: grading-worker/Dockerfile
     restart: unless-stopped
     depends_on:
       postgres:
@@ -128,11 +137,19 @@ services:
       schema-migrate:
         condition: service_completed_successfully
     environment:
+      <<: *worker-settings
       GRADING_DATABASE_URL: postgres://assessment_grader:${ASSESSMENT_GRADER_DB_PASSWORD}@postgres:5432/assessment_db?sslmode=disable
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8091/readyz >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
   notification-worker:
-    build: ./notification-worker
+    build:
+      context: .
+      dockerfile: notification-worker/Dockerfile
     restart: unless-stopped
     depends_on:
       postgres:
@@ -142,12 +159,19 @@ services:
       schema-migrate:
         condition: service_completed_successfully
     environment:
+      <<: *worker-settings
       ASSESSMENT_DATABASE_URL: postgres://assessment_app:${ASSESSMENT_APP_DB_PASSWORD}@postgres:5432/assessment_db?sslmode=disable
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       PUBLIC_APP_URL: ${PUBLIC_APP_URL:?run scripts/start-local.ps1 first}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-}
       SMTP_SENDER: ${SMTP_SENDER:-}
+      SMTP_MODE: ${SMTP_MODE:-mock}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8091/readyz >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
 volumes:
   local_pgdata:

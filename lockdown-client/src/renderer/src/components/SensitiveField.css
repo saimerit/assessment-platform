@@ -1,0 +1,82 @@
+.sensitive-field > label {
+  display: block;
+}
+
+.sensitive-field-control {
+  position: relative;
+}
+
+.sensitive-field-control > input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.sensitive-field-toggle {
+  position: absolute;
+  right: 3px;
+  top: 3px;
+  bottom: 3px;
+  width: 44px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #69789a;
+  cursor: pointer;
+  transition: background-color 180ms ease, color 180ms ease;
+}
+
+.sensitive-field-toggle:hover:not(:disabled) {
+  background: #edf0fa;
+  color: #465db2;
+}
+
+.sensitive-field-toggle:focus-visible {
+  outline: 2px solid #596fc9;
+  outline-offset: -2px;
+}
+
+.sensitive-field-toggle:disabled {
+  cursor: wait;
+  opacity: .5;
+}
+
+.sensitive-eye-open,
+.sensitive-eye-closed {
+  transform-origin: 12px 12px;
+  transition: opacity 180ms ease, transform 200ms ease;
+}
+
+.sensitive-eye-open {
+  opacity: 0;
+  transform: scaleY(.15);
+}
+
+.sensitive-eye-closed {
+  opacity: 1;
+  transform: scaleY(1);
+}
+
+.sensitive-field-toggle[data-visible='true'] .sensitive-eye-open {
+  opacity: 1;
+  transform: scaleY(1);
+}
+
+.sensitive-field-toggle[data-visible='true'] .sensitive-eye-closed {
+  opacity: 0;
+  transform: scaleY(.4);
+}
+
+.sensitive-field-control > input::-ms-reveal {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sensitive-field-toggle,
+  .sensitive-eye-open,
+  .sensitive-eye-closed {
+    transition: none;
+  }
+}

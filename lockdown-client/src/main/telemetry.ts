@@ -2,6 +2,7 @@ import http from 'node:http'
 import https from 'node:https'
 
 interface TelemetryOptions {
+    attemptToken: string;
     blueprintId: string;
     studentId: string;
     violationType: string;
@@ -10,12 +11,14 @@ interface TelemetryOptions {
 }
 
 export function reportViolation({
+    attemptToken,
     blueprintId,
     studentId,
     violationType,
     reportedBy = 'ELECTRON_LOCKDOWN_CLIENT',
     evidence = {}
 }: TelemetryOptions): void {
+    if (!attemptToken) return
     const apiBase = process.env.ASSESSMENT_API_URL
 	if (!apiBase) {
 		console.error('[Telemetry] ASSESSMENT_API_URL is not configured; incident was not sent.')
@@ -45,10 +48,12 @@ export function reportViolation({
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
+                Authorization: `Bearer ${attemptToken}`,
                 'Content-Length': Buffer.byteLength(payload)
             }
         },
         (res) => {
+            res.resume();
             if (res.statusCode !== 201) {
                 console.warn(`[Telemetry] Incident rejected with status ${res.statusCode}`);
             }
@@ -58,6 +63,7 @@ export function reportViolation({
     req.on('error', (err) => {
         console.error(`[Telemetry] Failed to dispatch incident: ${err.message}`);
     });
+    req.setTimeout(10_000, () => req.destroy(new Error('Incident request timed out')));
 
     req.write(payload);
     req.end();

@@ -1,0 +1,51 @@
+.page { min-height: 100vh; display: flex; flex-direction: column; background: radial-gradient(circle at 12% 5%, #edf0ff 0, transparent 28%), radial-gradient(circle at 88% 95%, #eef5ff 0, transparent 30%), #f7f8fc; color: #26345c; font-family: Inter, 'Segoe UI', Arial, sans-serif; line-height: 1.5; }
+.header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding: 17px 24px; border-bottom: 1px solid #e5e9f2; background: #fff; font-size: 12px; }
+.header strong { color: #445a9f; letter-spacing: 1px; }
+.header span { color: #76829b; font-size: 11px; }
+.content { display: flex; flex: 1; align-items: center; justify-content: center; padding: 32px 24px; }
+.panel { width: min(680px, 100%); border: 1px solid #e3e8f3; border-radius: 18px; padding: 28px; background: #fff; box-shadow: 0 24px 70px #293c6812; }
+.brand { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+.brandMark { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 12px; background: #10b981; color: #fff; font-weight: 900; font-size: 18px; }
+.brandName { color: #1e936d; font-weight: 750; font-size: 16px; }
+.candidateBadge { padding: 4px 8px; border-radius: 999px; background: #dcfce7; color: #16855f; font-size: 10px; font-weight: 700; }
+.eyebrow { margin: 0 0 6px; color: #596fc9; font-size: 11px; font-weight: 800; letter-spacing: 1.6px; text-transform: uppercase; }
+.title { margin: 0; color: #26345c; font-size: 26px; font-weight: 750; line-height: 1.3; }
+.description { margin: 8px 0 22px; color: #6b7892; font-size: 13px; }
+.invitation { margin: 20px 0; padding: 16px 18px; border: 1px solid #e3e8f3; border-radius: 12px; background: #fafbff; }
+.examTitle { margin: 0 0 5px; font-size: 17px; font-weight: 700; }
+.candidate { margin: 0; color: #6b7892; font-size: 12px; overflow-wrap: anywhere; }
+.card { padding: 18px; border: 1px solid #e3e8f3; border-radius: 12px; margin-bottom: 16px; }
+.cardHeading { display: flex; align-items: center; gap: 8px; margin: 0 0 14px; color: #34446c; font-size: 14px; font-weight: 700; }
+.cardHeading svg { color: #596fc9; }
+.details { display: grid; gap: 12px; margin: 0; }
+.detail { display: grid; grid-template-columns: 1fr 1fr; align-items: start; gap: 12px; font-size: 12px; }
+.detail dt { color: #6b7892; }
+.detail dd { margin: 0; text-align: right; font-weight: 600; overflow-wrap: anywhere; }
+.statusRow { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 15px; padding-top: 13px; border-top: 1px solid #e5e9f2; }
+.status { padding: 5px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; }
+.open { color: #138561; background: #edf9f3; }
+.closed { color: #b93651; background: #fff0f1; }
+.waiting { color: #946521; background: #fff8e8; }
+.serverTime { color: #76829b; font-size: 10px; }
+.version { color: #445a9f; font-variant-numeric: tabular-nums; }
+.notice { padding: 15px 16px; border: 1px solid #f1dfb6; border-radius: 10px; background: #fff8e8; color: #946521; margin: 0 0 16px; font-size: 13px; line-height: 1.65; }
+.notice strong { display: block; margin-bottom: 3px; font-size: 14px; }
+.notice p { margin: 0; }
+.error { padding: 13px 16px; border: 1px solid #f5d4da; border-radius: 10px; background: #fff0f1; color: #b93651; font-size: 13px; }
+.actions { display: grid; gap: 10px; }
+.primaryAction, .secondaryAction { display: block; padding: 13px 16px; border-radius: 9px; font-size: 13px; font-weight: 700; text-align: center; text-decoration: none; transition: background .15s ease, box-shadow .15s ease; }
+.primaryAction { border: 1px solid #596fc9; background: #596fc9; color: #fff; box-shadow: 0 5px 14px #596fc926; }
+.primaryAction:hover { background: #485db5; box-shadow: 0 7px 18px #596fc938; }
+.secondaryAction { border: 1px solid #dfe5f1; background: #fff; color: #596fc9; }
+.secondaryAction:hover { background: #f4f6fc; }
+.primaryAction:focus-visible, .secondaryAction:focus-visible { outline: 3px solid #8ba0ec; outline-offset: 3px; }
+.privacy { margin: 20px 0 0; color: #76829b; font-size: 11px; text-align: center; }
+.footer { padding: 12px 24px; border-top: 1px solid #e5e9f2; color: #76829b; background: #fff; font-size: 10px; text-align: center; }
+@media (max-width: 560px) {
+  .content { padding: 20px 14px; align-items: flex-start; }
+  .panel { padding: 22px 18px; }
+  .title { font-size: 23px; }
+  .detail { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+  .detail dd { text-align: left; }
+}
+@media (prefers-reduced-motion: reduce) { .primaryAction, .secondaryAction { transition: none; } }

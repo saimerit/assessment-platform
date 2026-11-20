@@ -4,16 +4,24 @@ import { createServer, type Server as HttpServer } from 'node:http'
 import { is } from '@electron-toolkit/utils'
 import { reportViolation } from './telemetry'
 import { mitigateUnwantedProcesses } from './processMitigation'
+import { AttemptRecoveryVault } from './AttemptRecoveryVault'
+import { verifySubmissionReceipt } from './SubmissionReceiptVerifier'
+import { SubmissionExitTimer } from './SubmissionExitTimer'
 
 let mainWindow: BrowserWindow | null = null
 let currentExamToken: string | null = null
-let activeExam = { blueprintId: '', studentId: '' }
+let activeExam = { blueprintId: '', studentId: '', attemptToken: '' }
 let isLockdownActive = false
 let lockdownShortcutsRegistered = false
 let versionProbeServer: HttpServer | null = null
 
 type ClientRuntimeConfig = { apiBaseURL: URL; portalBaseURL: URL }
 let runtimeConfig: ClientRuntimeConfig | null = null
+let recoveryVault: AttemptRecoveryVault | null = null
+let recoveryScope = ''
+let nativeCredentialGeneration = 0
+let verifiedAttempt: { kind: string; id: string; assessmentId: string } | null = null
+const submissionExitTimer = new SubmissionExitTimer(() => app.quit())
 
 function requiredRuntimeURL(name: 'ASSESSMENT_API_URL' | 'PUBLIC_PORTAL_URL'): URL {
   const raw = process.env[name]?.trim()
@@ -188,8 +196,7 @@ function createWindow(): void {
     if (isLockdownActive && !is.dev) {
       mainWindow?.setFullScreen(true);
       if (activeExam.blueprintId && activeExam.studentId) reportViolation({
-        blueprintId: activeExam.blueprintId,
-        studentId: activeExam.studentId,
+        ...activeExam,
         violationType: 'FULLSCREEN_EXIT_ATTEMPT'
       });
     }
@@ -199,8 +206,7 @@ function createWindow(): void {
     if (isLockdownActive && !is.dev) {
       console.warn('[Guard] Window focus lost!');
       if (activeExam.blueprintId && activeExam.studentId) reportViolation({
-        blueprintId: activeExam.blueprintId,
-        studentId: activeExam.studentId,
+        ...activeExam,
         violationType: 'WINDOW_FOCUS_LOST',
         evidence: { blur_timestamp: new Date().toISOString() }
       });
@@ -212,8 +218,7 @@ function createWindow(): void {
       mainWindow?.webContents.closeDevTools();
       console.warn('[Guard] DevTools access attempt!');
       if (activeExam.blueprintId && activeExam.studentId) reportViolation({
-        blueprintId: activeExam.blueprintId,
-        studentId: activeExam.studentId,
+        ...activeExam,
         violationType: 'DEVTOOLS_ACCESS_ATTEMPT'
       });
     }
@@ -224,8 +229,7 @@ function createWindow(): void {
       if (!isLockdownActive) return
       console.warn('[Guard] Secondary display attached!');
       if (activeExam.blueprintId && activeExam.studentId) reportViolation({
-        blueprintId: activeExam.blueprintId,
-        studentId: activeExam.studentId,
+        ...activeExam,
         violationType: 'SECONDARY_DISPLAY_ATTACHED',
         evidence: {
           display_id: newDisplay.id,
@@ -272,8 +276,7 @@ function registerLockdownShortcuts(): void {
     globalShortcut.register(key, () => {
       console.warn(`[Guard] Blocked restricted hotkey: ${key}`);
       if (activeExam.blueprintId && activeExam.studentId) reportViolation({
-        blueprintId: activeExam.blueprintId,
-        studentId: activeExam.studentId,
+        ...activeExam,
         violationType: 'BLOCKED_SHORTCUT_TRIGGERED',
         evidence: { shortcut: key }
       });
@@ -292,8 +295,48 @@ ipcMain.handle('check-monitors', () => {
 
 ipcMain.handle('exam:get-token', () => currentExamToken)
 
-ipcMain.handle('exam:set-context', (_event, context: { blueprintId: string; studentId: string }) => {
-  activeExam = context
+ipcMain.handle('exam:set-context', (event, context: { blueprintId: string; studentId: string }) => {
+  if (event.sender.id !== mainWindow?.webContents.id || !context || typeof context.blueprintId !== 'string' || typeof context.studentId !== 'string') throw new Error('Invalid assessment context')
+  activeExam = { ...context, attemptToken: activeExam.attemptToken }
+})
+
+ipcMain.handle('exam:set-attempt-token', async (event, token: string) => {
+  if (event.sender.id !== mainWindow?.webContents.id || typeof token !== 'string' || token.length > 8192) throw new Error('Invalid assessment credential update')
+  submissionExitTimer.cancel()
+  const generation = ++nativeCredentialGeneration
+  if (!token) { activeExam.attemptToken = ''; recoveryScope = ''; verifiedAttempt = null; return }
+  if (!runtimeConfig) throw new Error('Client configuration is unavailable')
+  const response = await fetch(new URL(runtimeConfig.apiBaseURL.toString().replace(/\/$/, '') + '/exam/identity'), { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) })
+  if (!response.ok) throw new Error('Assessment identity could not be verified')
+  const scope = await response.json() as { org_id: string; student_id: string; attempt_kind: string; attempt_id: string; assessment_id: string }
+  if (generation !== nativeCredentialGeneration) return
+  if (![scope.org_id, scope.student_id, scope.attempt_kind, scope.attempt_id, scope.assessment_id].every(value => typeof value === 'string' && value)) throw new Error('Invalid assessment recovery scope')
+  recoveryScope = JSON.stringify([runtimeConfig.apiBaseURL.toString(), scope.org_id, scope.student_id, scope.attempt_kind, scope.attempt_id])
+  verifiedAttempt = { kind: scope.attempt_kind, id: scope.attempt_id, assessmentId: scope.assessment_id }
+  activeExam.attemptToken = token
+})
+
+function requireRecoveryCaller(event: Electron.IpcMainInvokeEvent): AttemptRecoveryVault {
+  if (event.sender.id !== mainWindow?.webContents.id || !recoveryScope || !recoveryVault) throw new Error('Verified assessment access is required')
+  return recoveryVault
+}
+ipcMain.handle('recovery:read', event => requireRecoveryCaller(event).read(recoveryScope))
+ipcMain.handle('recovery:write', (event, value: string) => requireRecoveryCaller(event).write(recoveryScope, value))
+ipcMain.handle('recovery:clear', event => requireRecoveryCaller(event).clear(recoveryScope))
+ipcMain.handle('lockdown:release-after-submission', async (event, receiptId: string) => {
+  requireRecoveryCaller(event)
+  if (!runtimeConfig || !verifiedAttempt || typeof receiptId !== 'string') throw new Error('Verified submission is required')
+  await verifySubmissionReceipt(runtimeConfig.apiBaseURL.toString(), { ...verifiedAttempt, token: activeExam.attemptToken, generation: nativeCredentialGeneration }, receiptId,()=>nativeCredentialGeneration)
+  if (isLockdownActive) {
+    isLockdownActive = false
+    globalShortcut.unregisterAll()
+    lockdownShortcutsRegistered = false
+    mainWindow?.setKiosk(false)
+    mainWindow?.setAlwaysOnTop(false)
+    mainWindow?.setFullScreen(false)
+    mainWindow?.maximize()
+  }
+  return submissionExitTimer.start(receiptId)
 })
 
 ipcMain.handle('lockdown:engage', () => {
@@ -330,6 +373,8 @@ ipcMain.handle('quit-app', () => {
 
 app.whenReady().then(async () => {
   runtimeConfig = loadRuntimeConfig()
+  recoveryVault = new AttemptRecoveryVault()
+  await recoveryVault.prune()
   configureMediaPermissions()
   startVersionProbeServer()
   const mitigation = await mitigateUnwantedProcesses()
@@ -343,6 +388,7 @@ app.whenReady().then(async () => {
 })
 
 app.on('will-quit', () => {
+  submissionExitTimer.cancel()
   globalShortcut.unregisterAll()
   versionProbeServer?.close()
   versionProbeServer = null

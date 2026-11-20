@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { LockKeyholeIcon } from '@/lib/solar-icons';
+import styles from './gateway.module.css';
 
 interface Invitation {
   exam_title: string;
@@ -10,7 +11,7 @@ interface Invitation {
   scheduled_start: string;
   scheduled_end: string;
   server_time: string;
-  window_status: 'NOT_OPEN' | 'OPEN' | 'CLOSED';
+  window_status: 'NOT_OPEN' | 'OPEN' | 'IN_PROGRESS' | 'CLOSED' | 'EXPIRED' | 'SUBMITTED';
   min_client_version?: string;
   latest_client_url?: string;
 }
@@ -37,6 +38,11 @@ function compareVersions(installed: string, required: string): number {
     if (installedPart !== requiredPart) return installedPart > requiredPart ? 1 : -1;
   }
   return 0;
+}
+
+function DownloadAction({ url, update = false }: { url: string; update?: boolean }) {
+  if (!url) return <p className={styles.description}>Contact your assessment organizer for the latest client download.</p>;
+  return <a href={url} className={update ? styles.primaryAction : styles.secondaryAction}>{update ? 'Update Lockdown Client (.exe)' : 'Download Lockdown Client (.exe)'}</a>;
 }
 
 export default function ExamGateway({ token }: { token: string }) {
@@ -127,83 +133,50 @@ export default function ExamGateway({ token }: { token: string }) {
   const minVersion = invitation?.min_client_version || '1.0.0';
   const downloadURL = invitation?.latest_client_url || CLIENT_DOWNLOAD_URL;
   const versionOutdated = Boolean(clientVersion && compareVersions(clientVersion, minVersion) < 0);
-  const windowOpen = windowStatus === 'OPEN';
+  const submitted = windowStatus === 'SUBMITTED';
+  const windowOpen = windowStatus === 'OPEN' || windowStatus === 'IN_PROGRESS' || submitted;
+  const statusLabel = submitted ? 'Your assessment is submitted' : windowStatus === 'IN_PROGRESS' ? 'Your exam timer is running' : windowStatus === 'OPEN' ? 'The exam window is open' : windowStatus === 'EXPIRED' ? 'Your saved responses are being finalized' : windowStatus === 'CLOSED' ? 'The exam window has closed' : 'The exam has not started yet';
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-slate-950 p-6 text-slate-100">
-      <section className="w-full max-w-lg space-y-6 rounded-2xl border border-slate-800 bg-slate-900 p-8 shadow-2xl">
-        <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full border border-blue-500/20 bg-blue-500/10 text-blue-300" aria-hidden="true">
-          <LockKeyholeIcon size={28} />
-        </div>
-        <div className="text-center">
-          <h1 className="text-xl font-bold">Secure Exam Gateway</h1>
-          {invitation ? (
-            <>
-              <p className="mt-2 text-sm text-slate-300">{invitation.exam_title}</p>
-              <p className="mt-1 text-xs text-slate-400">Invited: {invitation.candidate_name} ({invitation.email})</p>
-            </>
-          ) : error ? (
-            <p role="alert" className="mt-2 text-sm text-rose-300">{error}</p>
-          ) : (
-            <p className="mt-2 text-sm text-slate-400">Verifying your invitation…</p>
-          )}
-        </div>
-
-        {invitation && <>
-          <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-            <div className="flex justify-between gap-3 text-xs"><span className="text-slate-400">Scheduled start</span><span className="text-right">{new Date(invitation.scheduled_start).toLocaleString()}</span></div>
-            <div className="flex justify-between gap-3 text-xs"><span className="text-slate-400">Scheduled end</span><span className="text-right">{new Date(invitation.scheduled_end).toLocaleString()}</span></div>
-            <div className="border-t border-slate-800 pt-3 text-center">
-              <p className={`text-sm font-semibold ${windowStatus === 'OPEN' ? 'text-emerald-300' : windowStatus === 'CLOSED' ? 'text-rose-300' : 'text-amber-200'}`}>{windowStatus === 'OPEN' ? 'The exam window is open' : windowStatus === 'CLOSED' ? 'The exam window has closed' : 'The exam has not started yet'}</p>
-              <p className="mt-1 text-[10px] text-slate-500">Server checked: {serverTime ? new Date(serverTime).toLocaleString() : 'Checking…'}</p>
-            </div>
-          </div>
-
-          <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-950/70 p-4">
-            <div className="flex justify-between gap-3 text-xs">
-              <span className="text-slate-400">Lockdown Client</span>
-              <span className="text-right">
-                {checkingClient ? 'Checking…' : clientDetected ? `Detected (v${clientVersion})` : 'Not detected'}
-              </span>
-            </div>
-            <div className="flex justify-between gap-3 text-xs">
-              <span className="text-slate-400">Minimum required</span>
-              <span className="font-mono">v{minVersion}</span>
-            </div>
-          </div>
-
-          {!windowOpen ? (
-            <div className="space-y-3 text-center">
-              <p className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">The server allows entry only during the scheduled exam window. This page checks again automatically.</p>
-              {!clientDetected && !checkingClient && <a href={downloadURL} className="block rounded-lg border border-slate-700 bg-slate-800 px-4 py-3 text-center text-sm font-medium text-slate-200 transition hover:bg-slate-700">Download Lockdown Client (.exe)</a>}
-            </div>
-          ) : versionOutdated ? (
-            <div className="space-y-3 text-center">
-              <p className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
-                Your client is outdated. Update to v{minVersion} or newer before starting this assessment.
-              </p>
-              <a href={downloadURL} className="block rounded-lg bg-amber-500 px-4 py-3 text-center text-sm font-semibold text-slate-950 transition hover:bg-amber-400">
-                Update Lockdown Client (.exe)
-              </a>
-            </div>
-          ) : clientDetected ? (
-            <a href={deepLink} className="block rounded-lg bg-blue-600 px-4 py-3 text-center text-sm font-medium text-white transition hover:bg-blue-500">
-              Launch Lockdown Client
-            </a>
-          ) : !checkingClient ? (
-            <div className="space-y-3">
-              <a href={deepLink} className="block rounded-lg bg-blue-600 px-4 py-3 text-center text-sm font-medium text-white transition hover:bg-blue-500">
-                I Have the Client — Open
-              </a>
-              <a href={downloadURL} className="block rounded-lg border border-slate-700 bg-slate-800 px-4 py-3 text-center text-sm font-medium text-slate-200 transition hover:bg-slate-700">
-                Download Client (.exe)
-              </a>
-            </div>
-          ) : null}
-        </>}
-
-        <p className="text-center text-xs text-slate-500">Keep this personal invitation link private.</p>
-      </section>
-    </main>
+    <div className={styles.page}>
+      <header className={styles.header}><strong>✦ OA SECURE CLIENT</strong><span>Secure assessment access</span></header>
+      <main className={styles.content}>
+        <section className={styles.panel} aria-labelledby="gateway-title">
+          <div className={styles.brand}><span className={styles.brandMark} aria-hidden="true">A</span><span className={styles.brandName}>AssessPro</span><span className={styles.candidateBadge}>Candidate</span></div>
+          <p className={styles.eyebrow}>Assessment check-in</p>
+          <h1 id="gateway-title" className={styles.title}>Secure Exam Gateway</h1>
+          <p className={styles.description}>Check your schedule and client before continuing to your assessment.</p>
+          {error ? <p role="alert" className={styles.error}>{error}</p> : !invitation ? <p role="status" className={styles.description}>Verifying your invitation…</p> : <>
+            <div className={styles.invitation}><h2 className={styles.examTitle}>{invitation.exam_title}</h2><p className={styles.candidate}>Invited: {invitation.candidate_name} ({invitation.email})</p></div>
+            <section className={styles.card} aria-labelledby="gateway-schedule-title">
+              <h2 id="gateway-schedule-title" className={styles.cardHeading}>Your entry window</h2>
+              <dl className={styles.details}>
+                <div className={styles.detail}><dt>Scheduled start</dt><dd><time dateTime={invitation.scheduled_start}>{new Date(invitation.scheduled_start).toLocaleString()}</time></dd></div>
+                <div className={styles.detail}><dt>Scheduled end</dt><dd><time dateTime={invitation.scheduled_end}>{new Date(invitation.scheduled_end).toLocaleString()}</time></dd></div>
+              </dl>
+              <div className={styles.statusRow}><span className={styles.status + ' ' + (windowOpen ? styles.open : windowStatus === 'CLOSED' ? styles.closed : styles.waiting)}>{statusLabel}</span><span className={styles.serverTime}>Server checked: {serverTime ? new Date(serverTime).toLocaleString() : 'Checking…'}</span></div>
+            </section>
+            <section className={styles.card} aria-labelledby="gateway-client-title">
+              <h2 id="gateway-client-title" className={styles.cardHeading}><LockKeyholeIcon size={18} aria-hidden="true" />Client compatibility</h2>
+              <dl className={styles.details}>
+                <div className={styles.detail}><dt>Lockdown Client</dt><dd className={styles.version}>{checkingClient ? 'Checking…' : clientDetected ? 'Detected (v' + clientVersion + ')' : 'Not detected'}</dd></div>
+                <div className={styles.detail}><dt>Minimum required</dt><dd className={styles.version}>v{minVersion}</dd></div>
+              </dl>
+            </section>
+            {!windowOpen ? <>
+              <div className={styles.notice} role="status"><strong>Waiting for your exam window</strong><p>The server allows entry only during the scheduled exam window. This page checks again automatically.</p></div>
+              {!clientDetected && !checkingClient && <DownloadAction url={downloadURL} />}
+            </> : versionOutdated ? <>
+              <div className={styles.notice} role="status"><strong>A client update is required</strong><p>Your client is outdated. Update to v{minVersion} or newer before starting this assessment.</p></div>
+              <DownloadAction url={downloadURL} update />
+            </> : clientDetected ? <a href={deepLink} className={styles.primaryAction}>{submitted ? 'Open Client to View Receipt' : 'Launch Lockdown Client'}</a> : !checkingClient ? <div className={styles.actions}>
+              <a href={deepLink} className={styles.primaryAction}>{submitted ? 'I Have the Client — View Receipt' : 'I Have the Client — Open'}</a><DownloadAction url={downloadURL} />
+            </div> : null}
+          </>}
+          <p className={styles.privacy}>Keep this personal invitation link private.</p>
+        </section>
+      </main>
+      <footer className={styles.footer}>{submitted ? 'Sign in with your invited candidate account to retrieve the receipt.' : windowStatus === 'IN_PROGRESS' ? 'Your original exam timer continues while you reconnect.' : 'Assessment check-in · Your exam timer begins when you enter the exam.'}</footer>
+    </div>
   );
 }

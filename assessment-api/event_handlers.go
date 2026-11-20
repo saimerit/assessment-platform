@@ -15,7 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
-	amqp "github.com/rabbitmq/amqp091-go"
+
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -221,7 +221,7 @@ func (s *Server) CreateProctor(c *gin.Context) {
 	}
 	invite := NotificationEventPayload{Event: "PROCTOR_INVITE", RecipientEmail: strings.TrimSpace(req.Email), CandidateName: strings.TrimSpace(req.FullName), ExamTitle: "Assessment Proctor Portal", Passcode: password, InvitationURL: publicAppURL() + "/login"}
 	inviteBytes, _ := json.Marshal(invite)
-	if err := s.mqChan.PublishWithContext(c.Request.Context(), "", "notification_events", false, false, amqp.Publishing{ContentType: "application/json", DeliveryMode: amqp.Persistent, Body: inviteBytes}); err != nil {
+	if err := s.messages.Publish(c.Request.Context(), "notification_events", newCheckpointUpdateID(), inviteBytes); err != nil {
 		log.Printf("Failed to queue proctor welcome email for account %s: %v", id, err)
 		resp["invite_sent"] = false
 	} else {
@@ -862,7 +862,7 @@ func (s *Server) InviteEventCandidates(c *gin.Context) {
 		}
 		payload := NotificationEventPayload{Event: "EXAM_INVITATION", RecipientEmail: cand.Email, CandidateName: cand.FullName, ExamTitle: title, ScheduledStart: start, ScheduledEnd: end, AssessmentID: eventID, ProctoringMode: mode, InvitationToken: strings.TrimPrefix(invites[i].InvitationURL, buildGatewayURL("")), InvitationURL: invites[i].InvitationURL, TemporaryPassword: invites[i].TemporaryPassword, ClientDownloadURL: clientReleaseURL()}
 		body, _ := json.Marshal(payload)
-		_ = s.mqChan.PublishWithContext(ctx, "", "notification_events", false, false, amqp.Publishing{ContentType: "application/json", DeliveryMode: amqp.Persistent, Body: body})
+		_ = s.messages.Publish(ctx, "notification_events", newCheckpointUpdateID(), body)
 	}
 	c.JSON(200, gin.H{"assessment_id": eventID, "invited": len(invites), "invitations": invites})
 }
@@ -969,7 +969,7 @@ func (s *Server) AssignEventCandidates(c *gin.Context) {
 		token := strings.TrimPrefix(invite.InvitationURL, buildGatewayURL(""))
 		payload := NotificationEventPayload{Event: "EXAM_INVITATION", RecipientEmail: invite.Email, CandidateName: invite.CandidateName, ExamTitle: title, ScheduledStart: start, ScheduledEnd: end, AssessmentID: eventID, ProctoringMode: mode, InvitationToken: token, InvitationURL: invite.InvitationURL, ClientDownloadURL: clientReleaseURL()}
 		body, _ := json.Marshal(payload)
-		_ = s.mqChan.PublishWithContext(ctx, "", "notification_events", false, false, amqp.Publishing{ContentType: "application/json", DeliveryMode: amqp.Persistent, Body: body})
+		_ = s.messages.Publish(ctx, "notification_events", newCheckpointUpdateID(), body)
 	}
 	c.JSON(http.StatusOK, gin.H{"assessment_id": eventID, "assigned": len(invites), "invitations": invites})
 }

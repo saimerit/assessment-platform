@@ -1,3 +1,10 @@
+x-worker-settings: &worker-settings
+  WORKER_MAX_ATTEMPTS: ${WORKER_MAX_ATTEMPTS:-5}
+  WORKER_PROCESSING_TIMEOUT: ${WORKER_PROCESSING_TIMEOUT:-15s}
+  WORKER_RETRY_DELAYS: ${WORKER_RETRY_DELAYS:-2s,10s,30s,60s}
+  WORKER_QUEUE_AGE_WARNING: ${WORKER_QUEUE_AGE_WARNING:-5m}
+  RABBITMQ_MANAGEMENT_URL: ${RABBITMQ_MANAGEMENT_URL:-}
+
 services:
   gateway:
     image: caddy:2.10-alpine
@@ -34,22 +41,39 @@ services:
       CLIENT_RELEASE_URL: ${CLIENT_RELEASE_URL:?set CLIENT_RELEASE_URL}
 
   grading-worker:
-    build: ./grading-worker
+    build:
+      context: .
+      dockerfile: grading-worker/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *worker-settings
       GRADING_DATABASE_URL: ${GRADING_DATABASE_URL:?set GRADING_DATABASE_URL}
       RABBITMQ_URL: ${RABBITMQ_URL:?set RABBITMQ_URL}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8091/readyz >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
   notification-worker:
-    build: ./notification-worker
+    build:
+      context: .
+      dockerfile: notification-worker/Dockerfile
     restart: unless-stopped
     environment:
+      <<: *worker-settings
       ASSESSMENT_DATABASE_URL: ${ASSESSMENT_DATABASE_URL:?set ASSESSMENT_DATABASE_URL}
       RABBITMQ_URL: ${RABBITMQ_URL:?set RABBITMQ_URL}
       PUBLIC_APP_URL: ${PUBLIC_APP_URL:?set PUBLIC_APP_URL}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-}
       SMTP_SENDER: ${SMTP_SENDER:-}
+      SMTP_MODE: ${SMTP_MODE:-smtp}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8091/readyz >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
 volumes:
   caddy_data:
